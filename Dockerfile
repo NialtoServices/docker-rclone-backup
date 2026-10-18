@@ -107,3 +107,19 @@ COPY --chmod=0755 jobs/files /usr/local/bin/backup
 CMD ["/usr/local/bin/start"]
 
 LABEL org.opencontainers.image.description="Scheduled rclone mirror of a folder or remote into a versioned bucket"
+
+FROM base AS sqlite
+
+USER 0:0
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends sqlite3 \
+	&& rm -rf /var/lib/apt/lists/*
+
+COPY --chmod=0755 jobs/sqlite /usr/local/bin/backup
+
+USER 65532:65532
+
+CMD ["/usr/local/bin/start"]
+
+LABEL org.opencontainers.image.description="Scheduled snapshot of a SQLite database, checked and compressed, uploaded to a versioned bucket"

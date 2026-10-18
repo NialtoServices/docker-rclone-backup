@@ -1,0 +1,278 @@
+#!/bin/sh
+#
+# Tests for the sqlite image, run from anywhere on a host with Docker:
+#
+#   test/sqlite IMAGE
+#
+# Each run's output goes to a log file that is shown only when a check fails.
+
+# The single-quoted scripts passed to `sh -c` expand inside the container, not on the host.
+# shellcheck disable=SC2016
+
+set -eu
+
+if [ "$#" -ne 1 ]
+then
+  echo "usage: $0 IMAGE" >&2
+  exit 2
+fi
+
+IMAGE="$1"
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# shellcheck source=lib.sh
+. "${TEST_DIR}/lib.sh"
+
+make_work_dir "${IMAGE}"
+
+DATA_DIR="${WORK_DIR}/data"
+TARGET_DIR="${WORK_DIR}/target"
+STAGING_DIR="${WORK_DIR}/staging"
+
+mkdir -m 0777 "${DATA_DIR}" "${TARGET_DIR}" "${STAGING_DIR}"
+
+WRITER_NAME="sqlite-writer-$$"
+
+stop_writer() {
+  docker rm --force "${WRITER_NAME}" > /dev/null 2>&1 || true
+}
+
+# Stops the writer before the work directory goes, since it writes into it, and keeps the exit status
+# the script was already exiting with.
+clean_up() {
+  EXIT_STATUS=$?
+
+  stop_writer
+  remove_work_dir "${EXIT_STATUS}"
+}
+
+trap clean_up EXIT
+
+# Runs the job against the mounted directories with the given database and target, followed by any
+# further docker run options. JOB_ARGUMENT, when set, is passed to the job itself.
+run_job() {
+  JOB_DATABASE="$1"
+  JOB_TARGET="$2"
+  shift 2
+
+  hardened_run --user 1000:1000 \
+    -v "${DATA_DIR}:/data" \
+    -v "${TARGET_DIR}:/target" \
+    -v "${STAGING_DIR}:/staging" \
+    -e "SQLITE_DATABASE=${JOB_DATABASE}" \
+    -e "BACKUP_TARGET=${JOB_TARGET}" \
+    -e BACKUP_STAGING_PATH=/staging \
+    "$@" \
+    "${IMAGE}" /usr/local/bin/backup ${JOB_ARGUMENT:+"${JOB_ARGUMENT}"} > "${LOG_FILE}" 2>&1
+}
+
+# The job writes with mode 0600, so the host user, whose uid differs from the job's on a Linux runner,
+# can't read the database or the target itself. These run a command in a container that sees them as
+# the application does.
+in_data() {
+  hardened_run --user 1000:1000 -v "${DATA_DIR}:/data" "${IMAGE}" "$@"
+}
+
+in_target() {
+  hardened_run --user 1000:1000 -v "${TARGET_DIR}:/target:ro" "${IMAGE}" "$@"
+}
+
+# Starts each check from empty directories.
+prepare_directories() {
+  stop_writer
+  empty_work_subdirectories
+  JOB_ARGUMENT=""
+}
+
+# Creates /data/app.db in WAL mode, as the application would, and closes it cleanly.
+create_database() {
+  in_data sqlite3 /data/app.db "PRAGMA journal_mode=WAL; CREATE TABLE notes(body TEXT); INSERT INTO notes VALUES ('first'), ('second');" > /dev/null
+}
+
+# Restores OBJECT from the target as the README's restore command does, and prints the integrity
+# check followed by the row count.
+restore_and_inspect() {
+  in_target sh -c '
+    zstd -dc "$1" > /tmp/restored.db \
+      && sqlite3 /tmp/restored.db "PRAGMA integrity_check; SELECT count(*) FROM notes;"
+  ' sh "$1"
+}
+
+# Prints the inode and modification time of every file under the target.
+target_fingerprint() {
+  in_target find /target -type f -exec stat -c '%i %Y %n' {} +
+}
+
+staging_is_empty() {
+  hardened_run --user 1000:1000 -v "${STAGING_DIR}:/staging:ro" "${IMAGE}" sh -c '[ -z "$(find /staging -mindepth 1)" ]'
+}
+
+target_is_empty() {
+  in_target sh -c '[ -z "$(find /target -mindepth 1)" ]'
+}
+
+snapshot_of_a_database_being_written_restores() {
+  prepare_directories
+
+  # One long-lived connection keeps the WAL and its -shm open, as a running application does, and
+  # inserts every 20 ms.
+  docker run --detach --name "${WRITER_NAME}" --user 1000:1000 -v "${DATA_DIR}:/data" "${IMAGE}" sh -c '
+    {
+      echo ".timeout 5000"
+      echo "PRAGMA journal_mode=WAL;"
+      echo "CREATE TABLE notes(body TEXT);"
+
+      while true
+      do
+        echo "INSERT INTO notes VALUES (hex(randomblob(200)));"
+        sleep 0.02
+      done
+    } | sqlite3 /data/app.db > /dev/null
+  ' > /dev/null
+
+  wait_for in_data sh -c '[ "$(sqlite3 /data/app.db "SELECT count(*) FROM notes" 2> /dev/null || echo 0)" -gt 50 ]' \
+    && run_job /data/app.db /target \
+    && RESTORED="$(restore_and_inspect /target/app.db.zst)" \
+    && [ "$(echo "${RESTORED}" | sed -n 1p)" = "ok" ] \
+    && [ "$(echo "${RESTORED}" | sed -n 2p)" -gt 0 ] \
+    && staging_is_empty
+}
+
+cleanly_stopped_wal_database_is_backed_up() {
+  prepare_directories
+  create_database
+
+  in_data sh -c '[ ! -e /data/app.db-shm ] && [ ! -e /data/app.db-wal ]' \
+    && run_job /data/app.db /target \
+    && [ "$(restore_and_inspect /target/app.db.zst | tr '\n' ' ')" = "ok 2 " ] \
+    && in_data sh -c '[ ! -e /data/app.db-shm ] && [ ! -e /data/app.db-wal ]'
+}
+
+missing_database_fails_and_creates_nothing() {
+  prepare_directories
+
+  ! run_job /data/missing.db /target \
+    && grep -q "missing.db" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty \
+    && in_data sh -c '[ -z "$(find /data -mindepth 1)" ]'
+}
+
+symlinked_database_is_refused() {
+  prepare_directories
+  create_database
+  in_data sh -c 'ln -s /data/app.db /data/link.db && mkdir /data/real && cp /data/app.db /data/real/app.db && ln -s /data/real /data/linked-directory'
+
+  ! run_job /data/link.db /target \
+    && grep -q "/data/link.db" "${LOG_FILE}" \
+    && ! run_job /data/linked-directory/app.db /target \
+    && grep -q "/data/linked-directory/app.db" "${LOG_FILE}" \
+    && target_is_empty
+}
+
+trailing_slash_database_path_is_refused() {
+  prepare_directories
+  create_database
+
+  ! run_job /data/app.db/ /target \
+    && target_is_empty
+}
+
+unchanged_database_is_not_uploaded_again() {
+  prepare_directories
+  create_database
+
+  run_job /data/app.db /target \
+    && FIRST_FINGERPRINT="$(target_fingerprint)" \
+    && sleep 1 \
+    && run_job /data/app.db /target \
+    && [ "$(target_fingerprint)" = "${FIRST_FINGERPRINT}" ]
+}
+
+changed_database_is_uploaded_again() {
+  prepare_directories
+  create_database
+
+  run_job /data/app.db /target \
+    && FIRST_FINGERPRINT="$(target_fingerprint)" \
+    && in_data sqlite3 /data/app.db "INSERT INTO notes VALUES ('third');" \
+    && run_job /data/app.db /target \
+    && [ "$(target_fingerprint)" != "${FIRST_FINGERPRINT}" ] \
+    && [ "$(restore_and_inspect /target/app.db.zst | tr '\n' ' ')" = "ok 3 " ]
+}
+
+crypt_target_is_uploaded_every_run() {
+  prepare_directories
+  create_database
+
+  OBSCURED_PASSWORD="$(hardened_run "${IMAGE}" rclone obscure "a crypt password")" \
+    && run_job /data/app.db secret: \
+      -e RCLONE_CONFIG_SECRET_TYPE=crypt \
+      -e RCLONE_CONFIG_SECRET_REMOTE=/target \
+      -e "RCLONE_CONFIG_SECRET_PASSWORD=${OBSCURED_PASSWORD}" \
+    && grep -q "every run uploads" "${LOG_FILE}" \
+    && FIRST_FINGERPRINT="$(target_fingerprint)" \
+    && [ -n "${FIRST_FINGERPRINT}" ] \
+    && sleep 1 \
+    && run_job /data/app.db secret: \
+      -e RCLONE_CONFIG_SECRET_TYPE=crypt \
+      -e RCLONE_CONFIG_SECRET_REMOTE=/target \
+      -e "RCLONE_CONFIG_SECRET_PASSWORD=${OBSCURED_PASSWORD}" \
+    && [ "$(target_fingerprint)" != "${FIRST_FINGERPRINT}" ]
+}
+
+trailing_slash_on_target_is_ignored() {
+  prepare_directories
+  create_database
+
+  run_job /data/app.db /target/ \
+    && in_target test -f /target/app.db.zst \
+    && ! grep -qF "/target//" "${LOG_FILE}" \
+    && [ "$(in_target find /target -mindepth 1 | wc -l | tr -d ' ')" = "1" ]
+}
+
+unusual_file_name_is_backed_up() {
+  prepare_directories
+  in_data sqlite3 "/data/it's a 100%? #db.sqlite" "CREATE TABLE notes(body TEXT); INSERT INTO notes VALUES ('only');" \
+    && run_job "/data/it's a 100%? #db.sqlite" /target \
+    && [ "$(restore_and_inspect "/target/it's a 100%? #db.sqlite.zst" | tr '\n' ' ')" = "ok 1 " ]
+}
+
+check_accepts_valid_settings_silently() {
+  prepare_directories
+  JOB_ARGUMENT="--check"
+
+  run_job /data/not-created-yet.db /target \
+    && [ ! -s "${LOG_FILE}" ] \
+    && target_is_empty
+}
+
+check_rejects_a_relative_database_path() {
+  prepare_directories
+  JOB_ARGUMENT="--check"
+
+  ! run_job data/app.db /target \
+    && grep -q "data/app.db" "${LOG_FILE}"
+}
+
+an_unknown_sqlite_setting_is_refused() {
+  prepare_directories
+  JOB_ARGUMENT="--check"
+
+  ! run_job /data/app.db /target -e SQLITE_DATABSE=/data/app.db \
+    && grep -q "SQLITE_DATABSE" "${LOG_FILE}"
+}
+
+check "a snapshot of a WAL database being written restores and passes the integrity check" with_log snapshot_of_a_database_being_written_restores
+check "a cleanly stopped WAL database with no -shm is backed up" with_log cleanly_stopped_wal_database_is_backed_up
+check "a missing database fails, uploads nothing and creates no file" with_log missing_database_fails_and_creates_nothing
+check "a symlinked database path is refused" with_log symlinked_database_is_refused
+check "a database path with a trailing slash is refused" with_log trailing_slash_database_path_is_refused
+check "an unchanged database is not uploaded again" with_log unchanged_database_is_not_uploaded_again
+check "a changed database is uploaded again" with_log changed_database_is_uploaded_again
+check "a crypt target is uploaded every run" with_log crypt_target_is_uploaded_every_run
+check "a trailing slash on BACKUP_TARGET is ignored" with_log trailing_slash_on_target_is_ignored
+check "a database file name with quotes and URI characters is backed up" with_log unusual_file_name_is_backed_up
+check "--check accepts valid settings without snapshotting or printing" with_log check_accepts_valid_settings_silently
+check "--check rejects a relative database path" with_log check_rejects_a_relative_database_path
+check "an unknown SQLITE_ setting is refused" with_log an_unknown_sqlite_setting_is_refused

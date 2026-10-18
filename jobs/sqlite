@@ -1,0 +1,71 @@
+#!/bin/sh
+#
+# Snapshots SQLITE_DATABASE with VACUUM INTO, checks the snapshot, compresses it and uploads it to
+# BACKUP_TARGET as <file name>.zst. With --check, validates the settings, prints nothing and exits 0.
+
+set -eu
+
+umask 077
+
+. /usr/local/lib/rclone-backup/log.sh
+. /usr/local/lib/rclone-backup/settings.sh
+. /usr/local/lib/rclone-backup/job.sh
+
+CHECK_ONLY=false
+
+case "${1:-}" in
+  --check) CHECK_ONLY=true ;;
+  "") ;;
+  *) fatal "unknown argument '$1'" ;;
+esac
+
+refuse_unknown_settings SQLITE_DATABASE BACKUP_STAGING_PATH
+require_settings SQLITE_DATABASE BACKUP_TARGET
+require_location BACKUP_TARGET
+
+case "${SQLITE_DATABASE}" in
+  /*) ;;
+  *) fatal "'SQLITE_DATABASE' must be an absolute path, not '${SQLITE_DATABASE}'" ;;
+esac
+
+if [ "${CHECK_ONLY}" = true ]
+then
+  exit 0
+fi
+
+acquire_run_lock
+
+# The path is not resolved by --check because the database may not exist yet when the container
+# starts. A path through a symlink would back up whichever file the link points to at run time, not
+# the one configured.
+RESOLVED_DATABASE="$(realpath "${SQLITE_DATABASE}")" || fatal "failed to resolve '${SQLITE_DATABASE}'"
+[ "${RESOLVED_DATABASE}" = "${SQLITE_DATABASE}" ] \
+  || fatal "'SQLITE_DATABASE' must be the file's real path, with no symlinks, '..' or trailing slash: '${SQLITE_DATABASE}' resolves to '${RESOLVED_DATABASE}'"
+
+open_staging_directory
+
+SNAPSHOT_PATH="${STAGING_DIRECTORY}/snapshot.db"
+
+# In a URI, '%', '?' and '#' end or escape the path, so they are percent-encoded; and SQL quotes the
+# staged path with single quotes, which a BACKUP_STAGING_PATH may contain.
+DATABASE_URI="file:$(printf '%s' "${SQLITE_DATABASE}" | sed -e 's/%/%25/g' -e 's/?/%3f/g' -e 's/#/%23/g')?mode=rw"
+SNAPSHOT_SQL_PATH="$(printf '%s' "${SNAPSHOT_PATH}" | sed "s/'/''/g")"
+
+# mode=rw opens an existing database only, so a missing file fails the run instead of being created
+# empty, and it checkpoints the WAL of an application that crashed. The snapshot reads a consistent
+# view while the application keeps writing.
+info "snapshotting ${SQLITE_DATABASE}"
+sqlite3 "${DATABASE_URI}" ".timeout 30000" "VACUUM INTO '${SNAPSHOT_SQL_PATH}'" \
+  || fatal "failed to snapshot ${SQLITE_DATABASE}"
+
+INTEGRITY_RESULT="$(sqlite3 -readonly "${SNAPSHOT_PATH}" "PRAGMA integrity_check")" \
+  || fatal "failed to check the snapshot of ${SQLITE_DATABASE}"
+[ "${INTEGRITY_RESULT}" = "ok" ] \
+  || fatal "the snapshot of ${SQLITE_DATABASE} failed its integrity check: ${INTEGRITY_RESULT}"
+
+zstd -q --rm "${SNAPSHOT_PATH}" || fatal "failed to compress the snapshot of ${SQLITE_DATABASE}"
+zstd -q --test "${SNAPSHOT_PATH}.zst" || fatal "the compressed snapshot of ${SQLITE_DATABASE} is corrupt"
+
+upload_staged_file "${SNAPSHOT_PATH}.zst" "$(basename "${SQLITE_DATABASE}").zst"
+
+info "backup complete: ${SQLITE_DATABASE} -> ${BACKUP_TARGET}"

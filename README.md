@@ -95,6 +95,70 @@ When the source holds files with different owners, no single uid can read them a
 
 Capabilities only take effect for root, and root inside a container is a larger target than an unprivileged uid, so prefer the owner's uid where one will do.
 
+## SQLite
+
+The `sqlite` image takes a consistent snapshot of one SQLite database with `VACUUM INTO` while the application keeps running, checks it with `PRAGMA integrity_check`, compresses it with zstd and uploads it to the target as `<file name>.zst` (`app.db.zst` for `/data/app.db`). The database file is never copied directly, which would capture a torn state of a database that is being written. A snapshot that fails its check is not uploaded, and the run fails.
+
+| Variable | Description |
+|---|---|
+| `SQLITE_DATABASE` | The absolute path of the database file inside the container. It must be the file's real path: a path that is, or lies under, a symlink is refused, so the file backed up is always the one configured |
+| `BACKUP_TARGET` | Where to upload the snapshot: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
+| `BACKUP_STAGING_PATH` | Where the snapshot is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the settings below, so a database larger than the `/tmp` tmpfs needs a volume here. The staged file is deleted after every run |
+
+- **Versioning is the history.** Each upload replaces the object at the target, so keep older snapshots by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
+- **An unchanged database adds no version.** The upload is compared by checksum, so a snapshot identical to the object already at the target is skipped. A target that can't report a checksum, such as a `crypt` remote, is uploaded on every run instead, and adds a version each time.
+- **A missing database fails the run.** The file is opened for writing only if it already exists, so a wrong path or an unmounted volume never produces an empty database.
+
+### Running as the application's user
+
+Run the container as the uid and gid that own the database, so it can read what the application can read and create the files SQLite needs. Find them with `docker exec <app> id`, or `stat` on the volume.
+
+**Mount the database's directory read-write.** A database in WAL mode keeps its recent writes in `app.db-wal`, and readers coordinate through `app.db-shm`. When the application has stopped cleanly, neither file exists, and SQLite has to create them while the snapshot is open, which needs a writable directory. A volume mounted `:ro` fails the run. The snapshot itself never modifies the database.
+
+```yaml
+services:
+  backup:
+    image: ghcr.io/nialtoservices/rclone-backup/sqlite
+    user: "1000:1000"
+    stop_grace_period: 2m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,nodev,noexec,nosuid,size=512m
+    volumes:
+      - app-data:/data
+    environment:
+      SQLITE_DATABASE: /data/app.db
+      BACKUP_TARGET: b2:my-bucket/app
+      BACKUP_SCHEDULE: "0 3 * * *"
+      RCLONE_CONFIG_B2_TYPE: b2
+      RCLONE_CONFIG_B2_ACCOUNT: <application key id>
+      RCLONE_CONFIG_B2_KEY: <application key>
+```
+
+### Root mode
+
+When the application's uid can't be matched, run as root and add back exactly two capabilities. `DAC_OVERRIDE` lets root open a database it doesn't own, and `CHOWN` lets SQLite give the `-wal` and `-shm` files it creates the database's owner:
+
+```yaml
+    user: "0:0"
+    cap_add: [DAC_OVERRIDE, CHOWN]
+```
+
+**Never add `DAC_OVERRIDE` without `CHOWN`.** Without `CHOWN`, those files are created owned by root, and an application running as another uid can then no longer open its own database's WAL, which breaks the application until the files are removed. Capabilities only take effect for root, and root inside a container is a larger target than an unprivileged uid, so prefer the application's uid where one will do.
+
+### Restoring
+
+Download the object from the target, then decompress it and check it. The result is an ordinary SQLite database file, and neither step needs this image:
+
+```sh
+zstd -d app.db.zst
+sqlite3 app.db 'PRAGMA integrity_check'
+```
+
+Stop the application, replace its database file with the restored one (removing any `-wal` and `-shm` files beside the old one), and start it again.
+
 ## Licence
 
 This project is licensed under the Apache-2.0 License - see the LICENSE file for details.
