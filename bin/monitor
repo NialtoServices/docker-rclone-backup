@@ -1,0 +1,88 @@
+#!/bin/sh
+#
+# Runs COMMAND, reports its start, success or failure to the heartbeat monitor and exits with the
+# command's own status. The URLs are optional and come from MONITOR_START_URL, MONITOR_SUCCESS_URL
+# and MONITOR_FAILURE_URL.
+
+set -eu -o pipefail
+
+. /usr/local/lib/rclone-backup/log.sh
+
+# Healthchecks.io stores no more than this many bytes of a ping body, and the end of a log is the part
+# that explains a failure.
+MONITOR_LOG_LIMIT=100000
+
+# Sends one ping to the monitor. A ping that still fails after curl's retries is logged, and never
+# changes the outcome of the run being reported.
+#
+# The URL reaches curl as config on stdin because ping URLs are secrets, and curl's arguments are
+# visible in the host's process list.
+ping_monitor() {
+  PING_EVENT="$1"
+  PING_URL="$2"
+  shift 2
+
+  [ -n "${PING_URL}" ] || return 0
+
+  printf 'url = "%s"\n' "${PING_URL}" | curl \
+    --config - \
+    --fail \
+    --silent \
+    --show-error \
+    --output /dev/null \
+    --max-time 10 \
+    --retry 5 \
+    --retry-connrefused \
+    "$@" \
+    || warn "failed to send the ${PING_EVENT} ping to the monitor"
+}
+
+# rclone connection strings (`:s3,access_key_id=…,secret_access_key=…:bucket`) carry credentials
+# inline, and both the backup scripts and rclone write them into the log.
+redact_credentials() {
+  sed -E "s/,([A-Za-z0-9_]+)=(\"[^\"]*\"|'[^']*'|[^,:]*)/,\\1=REDACTED/g"
+}
+
+# The container's stop signal goes to the whole process group of a run, this wrapper included. The
+# command is interrupted by it, and the wrapper has to outlive the command to report the failure. A
+# handler is used rather than ignoring the signal because an ignored signal is inherited by every
+# process the wrapper starts, which would stop the command from being interrupted at all.
+STOP_REQUESTED=false
+
+# shellcheck disable=SC2329  # invoked by the TERM trap, which shellcheck stops following at the exit below
+note_stop_request() {
+  STOP_REQUESTED=true
+}
+
+[ "$#" -gt 0 ] || fatal "usage: $(basename "$0") COMMAND [ARGUMENT...]"
+
+MONITOR_WORK_DIR="$(mktemp -d -t monitor.XXXXXX)" || fatal "failed to create a working directory"
+trap 'rm -rf "${MONITOR_WORK_DIR}"' EXIT
+trap note_stop_request TERM
+
+ping_monitor start "${MONITOR_START_URL:-}"
+
+COMMAND_STATUS=0
+
+if [ "${STOP_REQUESTED}" = true ]
+then
+  # A start ping to an unreachable monitor takes about 90 seconds, long enough for the stop signal
+  # to arrive before the command exists to receive it.
+  warn "stopped before '$1' started" 2>&1 | tee "${MONITOR_WORK_DIR}/log" >&2
+  COMMAND_STATUS=143
+else
+  # tee must outlive the command, which writes its clean-up messages while it is being stopped.
+  "$@" 2>&1 | { trap '' TERM; exec tee "${MONITOR_WORK_DIR}/log"; } || COMMAND_STATUS=$?
+fi
+
+if [ "${COMMAND_STATUS}" -eq 0 ]
+then
+  ping_monitor success "${MONITOR_SUCCESS_URL:-}"
+else
+  redact_credentials < "${MONITOR_WORK_DIR}/log" | tail -c "${MONITOR_LOG_LIMIT}" > "${MONITOR_WORK_DIR}/body" \
+    || warn "failed to prepare the log for the failure ping"
+
+  ping_monitor failure "${MONITOR_FAILURE_URL:-}" --data-binary "@${MONITOR_WORK_DIR}/body"
+fi
+
+exit "${COMMAND_STATUS}"

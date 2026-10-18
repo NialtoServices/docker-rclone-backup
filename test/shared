@@ -27,17 +27,24 @@ TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 make_work_dir "${IMAGE}"
 
 CONTAINER_NAME="rclone-backup-shared-$$"
+NETWORK_NAME="rclone-backup-shared-$$"
 TARGET_DIR="${WORK_DIR}/target"
+TAB="$(printf '\t')"
 
 mkdir -m 0777 "${TARGET_DIR}"
 
+# The fake monitor has to be gone before its network can be removed.
 cleanup() {
   CLEANUP_STATUS=$?
   docker rm --force "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+  stop_fake_monitor
+  docker network rm "${NETWORK_NAME}" > /dev/null 2>&1 || true
   remove_work_dir "${CLEANUP_STATUS}"
 }
 
 trap cleanup EXIT
+
+docker network create "${NETWORK_NAME}" > /dev/null
 
 # Runs start in the foreground for at most 10 seconds, with the given docker run options, saving its
 # output. The timeout runs inside the container, so a start that doesn't stop is reported as exit 124
@@ -48,6 +55,15 @@ run_start() {
 
 run_start_with_valid_settings() {
   run_start -e BACKUP_SOURCE=/source -e BACKUP_TARGET=remote:bucket "$@"
+}
+
+# Runs a throwaway container on the fake monitor's network with all three monitor URLs set.
+hardened_run_with_monitor() {
+  hardened_run --user 1000:1000 --network "${NETWORK_NAME}" \
+    -e "MONITOR_START_URL=http://${FAKE_MONITOR_NAME}:8080/start" \
+    -e "MONITOR_SUCCESS_URL=http://${FAKE_MONITOR_NAME}:8080/success" \
+    -e "MONITOR_FAILURE_URL=http://${FAKE_MONITOR_NAME}:8080/fail" \
+    "$@"
 }
 
 # Starts the container in the background with valid settings plus the given docker run options.
@@ -84,7 +100,7 @@ start_stops_with_message() {
 }
 
 valid_schedules_keep_running() {
-  for SCHEDULE in '0 3 * * *' '@daily' '*/15 * * * *'
+  for SCHEDULE in '0 3 * * *' '@daily' '*/15 * * * *' '0 9,21 * * 1-5' '0 3 ? * *' "0${TAB}3 * * *"
   do
     start_in_background -e "BACKUP_SCHEDULE=${SCHEDULE}" -e UNRELATED_SETTING=1
     sleep 2
@@ -103,7 +119,8 @@ valid_schedules_keep_running() {
 invalid_schedules_stop_the_container() {
   NEWLINE_SCHEDULE="$(printf '0 3 * * *\n* * * * *')"
 
-  for SCHEDULE in '"0 3 * * *"' '0 3 * *' '0 3 * * * # nightly' '@reboot' "${NEWLINE_SCHEDULE}"
+  # Everything after a macro would become part of the command, and supercronic has no @every.
+  for SCHEDULE in '"0 3 * * *"' '0 3 * *' '0 3 * * * # nightly' '@reboot' '@daily foo' '@every 5m' "@daily${TAB}3" "${NEWLINE_SCHEDULE}"
   do
     if ! start_stops_with_message "BACKUP_SCHEDULE must be" -e "BACKUP_SCHEDULE=${SCHEDULE}"
     then
@@ -196,7 +213,9 @@ target_has_partial_file() {
 }
 
 stop_during_a_scheduled_backup() {
-  hardened_run --detach --name "${CONTAINER_NAME}" --user 1000:1000 \
+  start_fake_monitor "${NETWORK_NAME}" || return 1
+
+  hardened_run_with_monitor --detach --name "${CONTAINER_NAME}" \
     -v "${TARGET_DIR}:/target" \
     -e 'BACKUP_SCHEDULE=* * * * * * *' \
     -e BACKUP_SOURCE=/tmp/source \
@@ -219,11 +238,119 @@ stop_during_a_scheduled_backup() {
   wait "${WAIT_PID}" || return 1
 
   [ "$(cat "${WORK_DIR}/exit-code")" -eq 143 ] || return 1
+  wait_for monitor_has_request '^POST /fail ' || return 1
 
   TARGET_LISTING="$(hardened_run --user 1000:1000 -v "${TARGET_DIR}:/target:ro" "${IMAGE}" ls -a /target)" || return 1
   case "${TARGET_LISTING}" in
     *.partial*) echo "a partial file was left behind: ${TARGET_LISTING}" >&2; return 1 ;;
   esac
+}
+
+monitor_hears_a_passing_run() {
+  start_fake_monitor "${NETWORK_NAME}" || return 1
+
+  hardened_run_with_monitor "${IMAGE}" /usr/local/bin/monitor true > "${LOG_FILE}" 2>&1 || return 1
+
+  wait_for monitor_has_request '^GET /success ' \
+    && monitor_has_request '^GET /start ' \
+    && ! monitor_has_request '^POST /fail '
+}
+
+failing_run_keeps_its_status_and_sends_a_redacted_log() {
+  start_fake_monitor "${NETWORK_NAME}" || return 1
+
+  MONITOR_STATUS=0
+  hardened_run_with_monitor "${IMAGE}" /usr/local/bin/monitor \
+    sh -c 'echo "syncing :s3,secret_access_key=TOPSECRET:bucket"; exit 3' > "${LOG_FILE}" 2>&1 || MONITOR_STATUS=$?
+  [ "${MONITOR_STATUS}" -eq 3 ] || return 1
+
+  wait_for monitor_has_request '^POST /fail ' \
+    && monitor_has_request 'secret_access_key=REDACTED' \
+    && ! monitor_has_request 'TOPSECRET' \
+    && ! monitor_has_request '^GET /success '
+}
+
+scheduled_run_reports_its_failure() {
+  start_fake_monitor "${NETWORK_NAME}" || return 1
+
+  hardened_run_with_monitor --detach --name "${CONTAINER_NAME}" \
+    -e 'BACKUP_SCHEDULE=* * * * * * *' \
+    -e BACKUP_SOURCE=/tmp/source \
+    -e BACKUP_TARGET=/tmp/target \
+    -e RCLONE_MAX_DELETE=0 \
+    "${IMAGE}" sh -c '
+    mkdir /tmp/source /tmp/target
+    echo stale > /tmp/target/stale
+    exec /usr/local/bin/start
+  ' > /dev/null || return 1
+
+  wait_for monitor_has_request '^POST /fail ' \
+    && monitor_has_request '^GET /start ' \
+    && docker exec "${CONTAINER_NAME}" test -e /tmp/target/stale
+  SCHEDULED_STATUS=$?
+
+  finish_background
+  return "${SCHEDULED_STATUS}"
+}
+
+monitor_url_stays_out_of_process_arguments() {
+  # The start URL is refused, so curl keeps retrying for about 30 seconds, long enough to be seen.
+  hardened_run --user 1000:1000 -e MONITOR_START_URL=http://127.0.0.1:1/secret-ping-token "${IMAGE}" sh -c '
+    /usr/local/bin/monitor true 2> /dev/null &
+
+    for ATTEMPT in $(seq 1 30)
+    do
+      pgrep -x curl > /dev/null && break
+      sleep 1
+    done
+    pgrep -x curl > /dev/null
+
+    ! ps -eo args | grep -q "[s]ecret-ping-token"
+  ' > "${LOG_FILE}" 2>&1
+}
+
+stopped_run_reports_the_output_it_wrote_while_stopping() {
+  start_fake_monitor "${NETWORK_NAME}" || return 1
+
+  hardened_run_with_monitor "${IMAGE}" sh -c '
+    setsid /usr/local/bin/monitor sh -c "
+      trap \"echo cleaning-up-after-stop; exit 1\" TERM
+      while true
+      do
+        sleep 1
+      done
+    " 2> /dev/null &
+    MONITOR_PID=$!
+    sleep 2
+    pkill -TERM -g "${MONITOR_PID}"
+
+    MONITOR_STATUS=0
+    wait "${MONITOR_PID}" || MONITOR_STATUS=$?
+
+    [ "${MONITOR_STATUS}" -eq 1 ]
+  ' > "${LOG_FILE}" 2>&1 || return 1
+
+  wait_for monitor_has_request 'cleaning-up-after-stop'
+}
+
+stop_before_the_run_starts_prevents_the_run() {
+  start_fake_monitor "${NETWORK_NAME}" || return 1
+
+  # The refused start ping keeps the wrapper busy, and the stop signal reaches its whole process
+  # group, as the container's does.
+  hardened_run_with_monitor -e MONITOR_START_URL=http://127.0.0.1:1/start "${IMAGE}" sh -c '
+    setsid /usr/local/bin/monitor touch /tmp/ran 2> /dev/null &
+    MONITOR_PID=$!
+    sleep 2
+    pkill -TERM -g "${MONITOR_PID}"
+
+    MONITOR_STATUS=0
+    wait "${MONITOR_PID}" || MONITOR_STATUS=$?
+
+    [ "${MONITOR_STATUS}" -eq 143 ] && [ ! -e /tmp/ran ]
+  ' > "${LOG_FILE}" 2>&1 || return 1
+
+  wait_for monitor_has_request '^POST /fail '
 }
 
 rclone_is_quiet_about_a_missing_config_file() {
@@ -270,7 +397,13 @@ check "a missing required setting stops the container at start-up, not at the fi
 check "start warns without a success URL" with_log start_warns_without_a_success_url
 check "start does not warn with a success URL" with_log start_is_quiet_with_a_success_url
 check "a second run is refused while one is running" with_log second_run_is_refused_while_one_is_running
-check "docker stop lets a scheduled backup clean up and exits 143" with_log stop_during_a_scheduled_backup
+check "the monitor hears the start and success of a passing run" with_log monitor_hears_a_passing_run
+check "a failing run keeps its exit status and sends a redacted log" with_log failing_run_keeps_its_status_and_sends_a_redacted_log
+check "a scheduled run reports its failure" with_log scheduled_run_reports_its_failure
+check "docker stop lets a scheduled backup clean up, report its failure and exit 143" with_log stop_during_a_scheduled_backup
+check "a stopped run reports the output it wrote while stopping" with_log stopped_run_reports_the_output_it_wrote_while_stopping
+check "a stop signal before the run starts prevents the run" with_log stop_before_the_run_starts_prevents_the_run
+check "a monitor URL never appears in process arguments" with_log monitor_url_stays_out_of_process_arguments
 check "an object name with a slash or a leading dot is refused" with_log settings_helpers_refuse_bad_object_names
 check "rclone is quiet about a missing config file" with_log rclone_is_quiet_about_a_missing_config_file
 check "RCLONE_CONFIG still names a mounted config file" with_log rclone_config_names_a_mounted_config_file

@@ -28,11 +28,16 @@ else
   # A '#' would comment out the command that follows the schedule, which supercronic -test accepts,
   # and a newline would add a second crontab entry. The allowed characters are those cron fields and
   # macros use, so everything else is refused before supercronic sees it.
+  #
+  # A macro takes no arguments, so whitespace after one means the next word would become part of the
+  # command (`@daily 3` runs `3 /usr/local/bin/monitor ...`), which supercronic -test accepts.
+  # supercronic has no `@every <duration>` either.
   case "${BACKUP_SCHEDULE}" in
     *[!0-9A-Za-z*/,?@" ${TAB}"-]*) refuse_invalid_schedule ;;
+    @*[" ${TAB}"]*) refuse_invalid_schedule ;;
   esac
 
-  echo "${BACKUP_SCHEDULE} /usr/local/bin/backup" > "${CRONTAB_PATH}"
+  echo "${BACKUP_SCHEDULE} /usr/local/bin/monitor /usr/local/bin/backup" > "${CRONTAB_PATH}"
   supercronic -test "${CRONTAB_PATH}" > /dev/null 2>&1 || refuse_invalid_schedule
 fi
 

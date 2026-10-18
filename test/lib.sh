@@ -70,6 +70,8 @@ empty_work_subdirectories() {
 remove_work_dir() {
   EXIT_STATUS="${1:-$?}"
 
+  stop_fake_monitor
+
   if ! delete_in_work_dir 1
   then
     echo "warning: could not empty ${WORK_DIR}" >&2
@@ -83,6 +85,41 @@ remove_work_dir() {
   fi
 
   exit "${EXIT_STATUS}"
+}
+
+# The fake monitor's container name. Backup containers on its network reach it at this name, on
+# port 8080.
+FAKE_MONITOR_NAME="fake-monitor-$$"
+
+# Starts a fake heartbeat monitor on the user-defined network NETWORK, replacing any earlier one. It
+# answers every request with 200 and appends it, headers and body, to /tmp/requests. It is a separate
+# container because the images carry no nc. nc serves one connection at a time, and the monitor
+# wrapper retries a refused connection, which covers the moment between two listens. TEST_DIR names
+# the directory holding test/servers.
+start_fake_monitor() {
+  stop_fake_monitor
+
+  docker run --detach --name "${FAKE_MONITOR_NAME}" --network "$1" \
+    "$(grep '^alpine:' "${TEST_DIR}/servers")" sh -c '
+    : > /tmp/requests
+
+    while true
+    do
+      printf "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" | nc -l -p 8080 >> /tmp/requests
+    done
+  ' > /dev/null
+}
+
+stop_fake_monitor() {
+  docker rm --force "${FAKE_MONITOR_NAME}" > /dev/null 2>&1 || true
+}
+
+monitor_requests() {
+  docker exec "${FAKE_MONITOR_NAME}" cat /tmp/requests
+}
+
+monitor_has_request() {
+  monitor_requests | grep -q -- "$1"
 }
 
 # Wraps a check function so the output saved in LOG_FILE is shown when it fails.

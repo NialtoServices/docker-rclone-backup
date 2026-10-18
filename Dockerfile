@@ -87,7 +87,7 @@ RUN groupadd --gid 65532 rclone-backup \
 COPY --from=rclone /tmp/rclone/rclone /usr/local/bin/rclone
 COPY --from=supercronic /tmp/supercronic/supercronic /usr/local/bin/supercronic
 COPY lib/ /usr/local/lib/rclone-backup/
-COPY --chmod=0755 bin/start /usr/local/bin/start
+COPY --chmod=0755 bin/start bin/monitor /usr/local/bin/
 
 # The image user has no home directory, so rclone's default config path doesn't exist and every run
 # would log a NOTICE about it. A remote defined through RCLONE_CONFIG_<REMOTE>_* variables needs no
