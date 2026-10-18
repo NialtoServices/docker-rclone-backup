@@ -18,10 +18,11 @@ open_staging_directory() {
   trap 'exit 143' TERM
 }
 
-# Copies one staged file to BACKUP_TARGET as OBJECT_NAME. The target's own trailing slash is dropped
-# so the object lands at <target>/<name> and not <target>//<name>. A bare remote such as `sftp:` is
-# joined without a slash, because `sftp:/name` addresses the filesystem root where `sftp:name`
-# addresses the remote's own root.
+# Copies one staged file to BACKUP_TARGET as OBJECT_NAME. The object name is appended directly to a
+# target that ends in `/` or `:`, and joined with a slash otherwise, so `b2:bucket/app/` and
+# `b2:bucket/app` both give `b2:bucket/app/<name>`. A target ending in `:` is a bare remote, where
+# `sftp:name` addresses the remote's own root and `sftp:/name` the filesystem root, so the slash
+# is never added or removed there.
 #
 # Where the target can report a hash, an object whose checksum matches is left alone, so an unchanged
 # dump adds no version to the bucket. A target that reports none (a crypt remote, for one) would make
@@ -31,9 +32,9 @@ upload_staged_file() {
   UPLOAD_SOURCE_PATH="$1"
   UPLOAD_OBJECT_NAME="$2"
 
-  case "${BACKUP_TARGET%/}" in
-    *:) UPLOAD_DESTINATION="${BACKUP_TARGET%/}${UPLOAD_OBJECT_NAME}" ;;
-    *) UPLOAD_DESTINATION="${BACKUP_TARGET%/}/${UPLOAD_OBJECT_NAME}" ;;
+  case "${BACKUP_TARGET}" in
+    */ | *:) UPLOAD_DESTINATION="${BACKUP_TARGET}${UPLOAD_OBJECT_NAME}" ;;
+    *) UPLOAD_DESTINATION="${BACKUP_TARGET}/${UPLOAD_OBJECT_NAME}" ;;
   esac
 
   TARGET_FEATURES="$(rclone backend features "${BACKUP_TARGET}")" \
