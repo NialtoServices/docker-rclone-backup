@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# Tests for the shared base image, run from anywhere on a host with Docker:
+#
+#   test/base IMAGE
+
+set -eu
+
+if [ "$#" -ne 1 ]
+then
+  echo "usage: $0 IMAGE" >&2
+  exit 2
+fi
+
+IMAGE="$1"
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+RCLONE_VERSION="$(sed -n 's/^ARG RCLONE_VERSION=//p' "${TEST_DIR}/../Dockerfile")"
+
+# shellcheck source=lib.sh
+. "${TEST_DIR}/lib.sh"
+
+rclone_is_official_release() {
+  # An official release reports its bare version; a source build carries a -DEV suffix.
+  [ "$(hardened_run "${IMAGE}" rclone version | head -n 1)" = "rclone v${RCLONE_VERSION}" ]
+}
+
+runs_as_nonroot_user() {
+  [ "$(hardened_run "${IMAGE}" id -u)" = "65532" ]
+}
+
+supercronic_runs() {
+  hardened_run "${IMAGE}" supercronic -version > /dev/null 2>&1
+}
+
+zone_data_is_present() {
+  hardened_run "${IMAGE}" test -e /usr/share/zoneinfo/Europe/London
+}
+
+procps_is_present() {
+  hardened_run "${IMAGE}" sh -c 'command -v pgrep && command -v pkill' > /dev/null
+}
+
+check "rclone is the official release" rclone_is_official_release
+check "supercronic runs" supercronic_runs
+check "it runs as 65532" runs_as_nonroot_user
+check "zone data is present" zone_data_is_present
+check "procps is present" procps_is_present

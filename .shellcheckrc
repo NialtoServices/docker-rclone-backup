@@ -1,0 +1,5 @@
+shell=dash
+
+# The scripts source paths that exist only inside the image, such as /usr/local/lib/rclone-backup/log.sh,
+# so shellcheck can't follow them from the repository.
+disable=SC1091
