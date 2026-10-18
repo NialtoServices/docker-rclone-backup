@@ -8,6 +8,8 @@ set -eu
 umask 077
 
 . /usr/local/lib/rclone-backup/log.sh
+. /usr/local/lib/rclone-backup/settings.sh
+. /usr/local/lib/rclone-backup/job.sh
 
 CHECK_ONLY=false
 
@@ -17,23 +19,17 @@ case "${1:-}" in
   *) fatal "unknown argument '$1'" ;;
 esac
 
-[ -n "${BACKUP_SOURCE:-}" ] || fatal "'BACKUP_SOURCE' is not set"
-[ -n "${BACKUP_TARGET:-}" ] || fatal "'BACKUP_TARGET' is not set"
-
-# A relative path resolves against the working directory, which differs between scheduled and manual
-# runs, and always lands inside the container's own filesystem.
-for LOCATION in "${BACKUP_SOURCE}" "${BACKUP_TARGET}"
-do
-  case "${LOCATION%%/*}" in
-    *:* | "") ;;
-    *) fatal "'${LOCATION}' is neither an rclone remote (remote:path) nor an absolute path" ;;
-  esac
-done
+refuse_unknown_settings BACKUP_SOURCE
+require_settings BACKUP_SOURCE BACKUP_TARGET
+require_location BACKUP_SOURCE
+require_location BACKUP_TARGET
 
 if [ "${CHECK_ONLY}" = true ]
 then
   exit 0
 fi
+
+acquire_run_lock
 
 info "syncing ${BACKUP_SOURCE} to ${BACKUP_TARGET}"
 rclone sync --stats-log-level NOTICE "${BACKUP_SOURCE}" "${BACKUP_TARGET}" || fatal "failed to sync ${BACKUP_SOURCE} to ${BACKUP_TARGET}"

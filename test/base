@@ -40,8 +40,18 @@ procps_is_present() {
   hardened_run "${IMAGE}" sh -c 'command -v pgrep && command -v pkill' > /dev/null
 }
 
+flock_is_present() {
+  hardened_run "${IMAGE}" sh -c 'command -v flock' > /dev/null
+}
+
+start_script_is_present() {
+  hardened_run "${IMAGE}" sh -n /usr/local/bin/start
+}
+
 check "rclone is the official release" rclone_is_official_release
 check "supercronic runs" supercronic_runs
 check "it runs as 65532" runs_as_nonroot_user
 check "zone data is present" zone_data_is_present
 check "procps is present" procps_is_present
+check "flock is present" flock_is_present
+check "the start script is present and parses" start_script_is_present

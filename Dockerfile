@@ -87,8 +87,14 @@ RUN groupadd --gid 65532 rclone-backup \
 COPY --from=rclone /tmp/rclone/rclone /usr/local/bin/rclone
 COPY --from=supercronic /tmp/supercronic/supercronic /usr/local/bin/supercronic
 COPY lib/ /usr/local/lib/rclone-backup/
+COPY --chmod=0755 bin/start /usr/local/bin/start
 
-ENV RCLONE_CACHE_DIR=/tmp/rclone-cache
+# The image user has no home directory, so rclone's default config path doesn't exist and every run
+# would log a NOTICE about it. A remote defined through RCLONE_CONFIG_<REMOTE>_* variables needs no
+# file, so the default is /dev/null; a deployment that mounts a config file names it in its own
+# RCLONE_CONFIG, which replaces this.
+ENV RCLONE_CACHE_DIR=/tmp/rclone-cache \
+	RCLONE_CONFIG=/dev/null
 
 USER 65532:65532
 
@@ -97,5 +103,7 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 FROM base AS files
 
 COPY --chmod=0755 jobs/files /usr/local/bin/backup
+
+CMD ["/usr/local/bin/start"]
 
 LABEL org.opencontainers.image.description="Scheduled rclone mirror of a folder or remote into a versioned bucket"

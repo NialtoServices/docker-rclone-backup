@@ -1,0 +1,80 @@
+#!/bin/sh
+#
+# Entry point of every image: validates the settings, writes the crontab and supervises supercronic
+# until the container is stopped.
+
+set -eu
+
+. /usr/local/lib/rclone-backup/log.sh
+
+BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-0 0 * * *}"
+CRONTAB_PATH=/tmp/crontab
+JOB_PATTERN='/usr/local/bin/(monitor|backup)( |$)'
+
+TAB="$(printf '\t')"
+
+refuse_invalid_schedule() {
+  fatal "BACKUP_SCHEDULE must be a cron schedule (e.g. '0 0 * * *'), a macro such as '@daily', or 'disabled', not '${BACKUP_SCHEDULE}'"
+}
+
+if [ "${BACKUP_SCHEDULE}" = "disabled" ]
+then
+  info "backups are disabled (BACKUP_SCHEDULE=disabled)"
+
+  # supercronic runs on an empty crontab, which keeps the container up; exiting would make restart
+  # policies like `always` restart it in a loop.
+  : > "${CRONTAB_PATH}"
+else
+  # A '#' would comment out the command that follows the schedule, which supercronic -test accepts,
+  # and a newline would add a second crontab entry. The allowed characters are those cron fields and
+  # macros use, so everything else is refused before supercronic sees it.
+  case "${BACKUP_SCHEDULE}" in
+    *[!0-9A-Za-z*/,?@" ${TAB}"-]*) refuse_invalid_schedule ;;
+  esac
+
+  echo "${BACKUP_SCHEDULE} /usr/local/bin/backup" > "${CRONTAB_PATH}"
+  supercronic -test "${CRONTAB_PATH}" > /dev/null 2>&1 || refuse_invalid_schedule
+fi
+
+# A bad setting stops the container now, not at the first scheduled run.
+/usr/local/bin/backup --check
+
+[ -n "${MONITOR_SUCCESS_URL:-}" ] || warn "MONITOR_SUCCESS_URL is not set, so a run that fails or never happens raises no alert"
+
+# supercronic starts each job in a process group of its own and, on SIGTERM, stops scheduling and
+# waits for running jobs without signalling them, so the SIGTERM from `docker stop` never reaches a
+# running backup. Every process group running a job is signalled directly, which lets the dump tool
+# or rclone clean up and fail the run, and the wrapper is given time to report that failure. The
+# groups are watched, not just the job's own process, because a tool outlives its parent script
+# while it cleans up.
+stop_gracefully() {
+  kill -TERM "${SUPERCRONIC_PID}" 2>/dev/null || true
+
+  JOB_GROUPS=""
+  for JOB_PID in $(pgrep -f "${JOB_PATTERN}" || true)
+  do
+    JOB_GROUP="$(ps -o pgid= -p "${JOB_PID}" | tr -d ' ')"
+    [ -n "${JOB_GROUP}" ] || continue
+
+    case ",${JOB_GROUPS}," in
+      *",${JOB_GROUP},"*) continue ;;
+    esac
+
+    JOB_GROUPS="${JOB_GROUPS:+${JOB_GROUPS},}${JOB_GROUP}"
+    kill -TERM "-${JOB_GROUP}" 2>/dev/null || true
+  done
+
+  while [ -n "${JOB_GROUPS}" ] && pgrep -g "${JOB_GROUPS}" > /dev/null
+  do
+    sleep 1
+  done
+
+  wait "${SUPERCRONIC_PID}" || true
+  exit 143
+}
+
+supercronic -passthrough-logs "${CRONTAB_PATH}" &
+SUPERCRONIC_PID=$!
+
+trap stop_gracefully TERM INT
+wait "${SUPERCRONIC_PID}"

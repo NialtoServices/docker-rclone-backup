@@ -1,0 +1,276 @@
+#!/bin/sh
+#
+# Tests for the behaviour every image shares, run against the files image from anywhere on a host
+# with Docker:
+#
+#   test/shared IMAGE
+#
+# Each run's output goes to a log file that is shown only when a check fails.
+
+# The single-quoted scripts passed to `sh -c` expand inside the container, not on the host.
+# shellcheck disable=SC2016
+
+set -eu
+
+if [ "$#" -ne 1 ]
+then
+  echo "usage: $0 IMAGE" >&2
+  exit 2
+fi
+
+IMAGE="$1"
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# shellcheck source=lib.sh
+. "${TEST_DIR}/lib.sh"
+
+make_work_dir "${IMAGE}"
+
+CONTAINER_NAME="rclone-backup-shared-$$"
+TARGET_DIR="${WORK_DIR}/target"
+
+mkdir -m 0777 "${TARGET_DIR}"
+
+cleanup() {
+  CLEANUP_STATUS=$?
+  docker rm --force "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+  remove_work_dir "${CLEANUP_STATUS}"
+}
+
+trap cleanup EXIT
+
+# Runs start in the foreground for at most 10 seconds, with the given docker run options, saving its
+# output. The timeout runs inside the container, so a start that doesn't stop is reported as exit 124
+# rather than left running on the host.
+run_start() {
+  hardened_run --user 1000:1000 "$@" "${IMAGE}" timeout 10 /usr/local/bin/start > "${LOG_FILE}" 2>&1
+}
+
+run_start_with_valid_settings() {
+  run_start -e BACKUP_SOURCE=/source -e BACKUP_TARGET=remote:bucket "$@"
+}
+
+# Starts the container in the background with valid settings plus the given docker run options.
+start_in_background() {
+  hardened_run --detach --name "${CONTAINER_NAME}" --user 1000:1000 \
+    -e BACKUP_SOURCE=/source -e BACKUP_TARGET=remote:bucket \
+    "$@" \
+    "${IMAGE}" > /dev/null
+}
+
+is_running() {
+  [ "$(docker inspect --format '{{.State.Running}}' "${CONTAINER_NAME}" 2> /dev/null)" = "true" ]
+}
+
+# Saves the background container's output where with_log can show it, then removes the container.
+finish_background() {
+  docker logs "${CONTAINER_NAME}" > "${LOG_FILE}" 2>&1 || true
+  docker rm --force "${CONTAINER_NAME}" > /dev/null 2>&1 || true
+}
+
+logged_output_contains() {
+  docker logs "${CONTAINER_NAME}" 2>&1 | grep -q -- "$1"
+}
+
+# Stops with exit 1 and a message containing $1, for the given docker run options.
+start_stops_with_message() {
+  EXPECTED_MESSAGE="$1"
+  shift
+
+  START_STATUS=0
+  run_start_with_valid_settings "$@" || START_STATUS=$?
+
+  [ "${START_STATUS}" -eq 1 ] && grep -q -- "${EXPECTED_MESSAGE}" "${LOG_FILE}"
+}
+
+valid_schedules_keep_running() {
+  for SCHEDULE in '0 3 * * *' '@daily' '*/15 * * * *'
+  do
+    start_in_background -e "BACKUP_SCHEDULE=${SCHEDULE}" -e UNRELATED_SETTING=1
+    sleep 2
+
+    if ! is_running
+    then
+      finish_background
+      echo "'${SCHEDULE}' stopped the container" >&2
+      return 1
+    fi
+
+    finish_background
+  done
+}
+
+invalid_schedules_stop_the_container() {
+  NEWLINE_SCHEDULE="$(printf '0 3 * * *\n* * * * *')"
+
+  for SCHEDULE in '"0 3 * * *"' '0 3 * *' '0 3 * * * # nightly' '@reboot' "${NEWLINE_SCHEDULE}"
+  do
+    if ! start_stops_with_message "BACKUP_SCHEDULE must be" -e "BACKUP_SCHEDULE=${SCHEDULE}"
+    then
+      echo "'${SCHEDULE}' was not refused" >&2
+      return 1
+    fi
+  done
+}
+
+disabled_schedule_keeps_running_with_nothing_scheduled() {
+  start_in_background -e BACKUP_SCHEDULE=disabled
+  sleep 2
+
+  is_running \
+    && docker exec "${CONTAINER_NAME}" test ! -s /tmp/crontab \
+    && docker exec "${CONTAINER_NAME}" pgrep -x supercronic > /dev/null
+  DISABLED_STATUS=$?
+
+  finish_background
+  return "${DISABLED_STATUS}"
+}
+
+unknown_settings_stop_the_container() {
+  start_stops_with_message "unknown settings: BACKUP_SOURSE, DATABASE_HOST" \
+    -e BACKUP_SOURSE=/x -e DATABASE_HOST=database
+}
+
+missing_settings_stop_the_container_at_start() {
+  START_STATUS=0
+  run_start -e BACKUP_TARGET=remote:bucket || START_STATUS=$?
+  [ "${START_STATUS}" -eq 1 ] && grep -q "'BACKUP_SOURCE' is not set" "${LOG_FILE}" || return 1
+
+  START_STATUS=0
+  run_start -e BACKUP_SOURCE=/source || START_STATUS=$?
+  [ "${START_STATUS}" -eq 1 ] && grep -q "'BACKUP_TARGET' is not set" "${LOG_FILE}"
+}
+
+start_warns_without_a_success_url() {
+  start_in_background
+  wait_for logged_output_contains "MONITOR_SUCCESS_URL is not set, so a run that fails or never happens raises no alert"
+  WARNING_STATUS=$?
+
+  finish_background
+  return "${WARNING_STATUS}"
+}
+
+start_is_quiet_with_a_success_url() {
+  start_in_background -e MONITOR_SUCCESS_URL=http://monitor.invalid/success
+  sleep 2
+
+  is_running && ! logged_output_contains "MONITOR_SUCCESS_URL"
+  QUIET_STATUS=$?
+
+  finish_background
+  return "${QUIET_STATUS}"
+}
+
+second_run_is_refused_while_one_is_running() {
+  hardened_run --user 1000:1000 \
+    -e BACKUP_SOURCE=/tmp/source \
+    -e BACKUP_TARGET=/tmp/target \
+    -e RCLONE_BWLIMIT=1M \
+    "${IMAGE}" sh -c '
+    set -e
+    mkdir /tmp/source /tmp/target
+    head -c 20000000 /dev/zero > /tmp/source/large
+
+    /usr/local/bin/backup 2> /dev/null &
+    FIRST_RUN_PID=$!
+
+    for ATTEMPT in $(seq 1 30)
+    do
+      pgrep -x rclone > /dev/null && break
+      sleep 1
+    done
+    pgrep -x rclone > /dev/null
+
+    if SECOND_RUN_OUTPUT="$(/usr/local/bin/backup 2>&1)"
+    then
+      exit 1
+    fi
+    kill "${FIRST_RUN_PID}"
+
+    echo "${SECOND_RUN_OUTPUT}" | grep "another backup is already running"
+  ' > "${LOG_FILE}" 2>&1
+}
+
+target_has_partial_file() {
+  docker exec "${CONTAINER_NAME}" sh -c 'ls -a /target | grep -q "\.partial$"'
+}
+
+stop_during_a_scheduled_backup() {
+  hardened_run --detach --name "${CONTAINER_NAME}" --user 1000:1000 \
+    -v "${TARGET_DIR}:/target" \
+    -e 'BACKUP_SCHEDULE=* * * * * * *' \
+    -e BACKUP_SOURCE=/tmp/source \
+    -e BACKUP_TARGET=/target \
+    -e RCLONE_BWLIMIT=1M \
+    "${IMAGE}" sh -c '
+    mkdir /tmp/source
+    head -c 60000000 /dev/zero > /tmp/source/large
+    exec /usr/local/bin/start
+  ' > /dev/null || return 1
+
+  wait_for target_has_partial_file || return 1
+
+  # At 1 MB/s the 60 MB source outlasts the grace period, so only a signalled backup stops in time.
+  # The container is removed as soon as it stops, so its exit code has to be collected by a wait
+  # that started before the stop.
+  docker wait "${CONTAINER_NAME}" > "${WORK_DIR}/exit-code" &
+  WAIT_PID=$!
+  docker stop --time 20 "${CONTAINER_NAME}" > /dev/null || return 1
+  wait "${WAIT_PID}" || return 1
+
+  [ "$(cat "${WORK_DIR}/exit-code")" -eq 143 ] || return 1
+
+  TARGET_LISTING="$(hardened_run --user 1000:1000 -v "${TARGET_DIR}:/target:ro" "${IMAGE}" ls -a /target)" || return 1
+  case "${TARGET_LISTING}" in
+    *.partial*) echo "a partial file was left behind: ${TARGET_LISTING}" >&2; return 1 ;;
+  esac
+}
+
+rclone_is_quiet_about_a_missing_config_file() {
+  RCLONE_OUTPUT="$(hardened_run --user 1000:1000 -e RCLONE_CONFIG_REMOTE_TYPE=local "${IMAGE}" rclone listremotes 2>&1)" \
+    && [ "${RCLONE_OUTPUT}" = "remote:" ]
+}
+
+rclone_config_names_a_mounted_config_file() {
+  printf '[mounted]\ntype = local\n' > "${WORK_DIR}/rclone.conf"
+
+  RCLONE_OUTPUT="$(hardened_run --user 1000:1000 \
+    -v "${WORK_DIR}/rclone.conf:/etc/rclone.conf:ro" \
+    -e RCLONE_CONFIG=/etc/rclone.conf \
+    "${IMAGE}" rclone listremotes 2>&1)" \
+    && [ "${RCLONE_OUTPUT}" = "mounted:" ]
+}
+
+settings_helpers_refuse_bad_object_names() {
+  for OBJECT_NAME in 'a/b' '.hidden' '../escape' '/absolute'
+  do
+    if hardened_run -e "OBJECT_NAME=${OBJECT_NAME}" "${IMAGE}" sh -c '
+      . /usr/local/lib/rclone-backup/log.sh
+      . /usr/local/lib/rclone-backup/settings.sh
+      require_object_name OBJECT_NAME
+    ' > "${LOG_FILE}" 2>&1
+    then
+      echo "'${OBJECT_NAME}' was accepted" >&2
+      return 1
+    fi
+  done
+
+  hardened_run -e OBJECT_NAME=app.dump "${IMAGE}" sh -c '
+    . /usr/local/lib/rclone-backup/log.sh
+    . /usr/local/lib/rclone-backup/settings.sh
+    require_object_name OBJECT_NAME
+  ' > "${LOG_FILE}" 2>&1
+}
+
+check "a valid schedule is accepted" with_log valid_schedules_keep_running
+check "an invalid schedule stops the container with exit 1" with_log invalid_schedules_stop_the_container
+check "a disabled schedule keeps running with nothing scheduled" with_log disabled_schedule_keeps_running_with_nothing_scheduled
+check "an unknown setting stops the container" with_log unknown_settings_stop_the_container
+check "a missing required setting stops the container at start-up, not at the first run" with_log missing_settings_stop_the_container_at_start
+check "start warns without a success URL" with_log start_warns_without_a_success_url
+check "start does not warn with a success URL" with_log start_is_quiet_with_a_success_url
+check "a second run is refused while one is running" with_log second_run_is_refused_while_one_is_running
+check "docker stop lets a scheduled backup clean up and exits 143" with_log stop_during_a_scheduled_backup
+check "an object name with a slash or a leading dot is refused" with_log settings_helpers_refuse_bad_object_names
+check "rclone is quiet about a missing config file" with_log rclone_is_quiet_about_a_missing_config_file
+check "RCLONE_CONFIG still names a mounted config file" with_log rclone_config_names_a_mounted_config_file
