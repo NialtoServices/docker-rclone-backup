@@ -20,30 +20,12 @@ TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib.sh
 . "${TEST_DIR}/lib.sh"
 
-WORK_DIR="$(mktemp -d)"
+make_work_dir "${IMAGE}"
+
 SOURCE_DIR="${WORK_DIR}/source"
 TARGET_DIR="${WORK_DIR}/target"
-LOG_FILE="${WORK_DIR}/output.log"
 
-mkdir "${SOURCE_DIR}" "${TARGET_DIR}"
-
-# The container runs as 1000:1000, which owns neither directory.
-chmod 0777 "${SOURCE_DIR}" "${TARGET_DIR}"
-
-# Runs inside the container, because the job leaves files the host user may not be allowed to remove.
-empty_directories() {
-  hardened_run --user 1000:1000 \
-    -v "${SOURCE_DIR}:/source" \
-    -v "${TARGET_DIR}:/target" \
-    "${IMAGE}" find /source /target -mindepth 1 -delete
-}
-
-cleanup() {
-  empty_directories > /dev/null 2>&1 || true
-  rm -rf "${WORK_DIR}"
-}
-
-trap cleanup EXIT
+mkdir -m 0777 "${SOURCE_DIR}" "${TARGET_DIR}"
 
 # Runs the job against the mounted directories with the given source and target, followed by any
 # further docker run options. JOB_ARGUMENT, when set, is passed to the job itself.
@@ -61,25 +43,23 @@ run_job() {
     "${IMAGE}" /usr/local/bin/backup ${JOB_ARGUMENT:+"${JOB_ARGUMENT}"} > "${LOG_FILE}" 2>&1
 }
 
-# Wraps a check function so the last run's output is shown when it fails.
-with_log() {
-  "$@" && return 0
-
-  cat "${LOG_FILE}" >&2
-  return 1
+# Runs a command in a container that sees the target as the job does. The job writes with mode 0600,
+# so the host user, whose uid differs from the job's on a Linux runner, can't read the target itself.
+in_target() {
+  hardened_run --user 1000:1000 -v "${TARGET_DIR}:/target:ro" "${IMAGE}" "$@"
 }
 
 # Starts each check from a source holding a file and a nested one, and a target holding a file the
 # source lacks.
 prepare_directories() {
-  empty_directories
+  empty_work_subdirectories
   JOB_ARGUMENT=""
 
   mkdir "${SOURCE_DIR}/nested"
   echo "alpha" > "${SOURCE_DIR}/alpha.txt"
   echo "beta" > "${SOURCE_DIR}/nested/beta.txt"
   echo "stale" > "${TARGET_DIR}/stale.txt"
-  chmod -R a+rX "${SOURCE_DIR}"
+  chmod -R a+rwX "${SOURCE_DIR}"
   chmod 0666 "${TARGET_DIR}/stale.txt"
 }
 
@@ -87,9 +67,9 @@ sync_mirrors_source_and_deletes_extras() {
   prepare_directories
 
   run_job /source /target \
-    && [ "$(cat "${TARGET_DIR}/alpha.txt")" = "alpha" ] \
-    && [ "$(cat "${TARGET_DIR}/nested/beta.txt")" = "beta" ] \
-    && [ ! -e "${TARGET_DIR}/stale.txt" ]
+    && [ "$(in_target cat /target/alpha.txt)" = "alpha" ] \
+    && [ "$(in_target cat /target/nested/beta.txt)" = "beta" ] \
+    && ! in_target test -e /target/stale.txt
 }
 
 relative_target_is_refused() {
@@ -97,14 +77,14 @@ relative_target_is_refused() {
 
   ! run_job /source relative/target \
     && grep -q "relative/target" "${LOG_FILE}" \
-    && [ -e "${TARGET_DIR}/stale.txt" ]
+    && in_target test -e /target/stale.txt
 }
 
 max_delete_caps_deletions() {
   prepare_directories
 
   ! run_job /source /target -e RCLONE_MAX_DELETE=0 \
-    && [ -e "${TARGET_DIR}/stale.txt" ]
+    && in_target test -e /target/stale.txt
 }
 
 run_logs_deletion_summary() {
@@ -120,7 +100,7 @@ check_accepts_valid_settings_silently() {
 
   run_job /source /target \
     && [ ! -s "${LOG_FILE}" ] \
-    && [ -e "${TARGET_DIR}/stale.txt" ]
+    && in_target test -e /target/stale.txt
 }
 
 check_rejects_invalid_settings() {

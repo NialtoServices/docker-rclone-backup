@@ -39,3 +39,56 @@ wait_for() {
 
   return 1
 }
+
+# Creates WORK_DIR, a temporary directory that any uid can write to, and LOG_FILE inside it, and
+# removes the directory on exit. The containers run as 1000 or 65532 while the host user is whoever
+# runs the tests (1001 on a Linux runner), so every directory a container writes into must be
+# world-writable, and what the containers leave behind must be removed from inside one.
+make_work_dir() {
+  WORK_IMAGE="$1"
+  WORK_DIR="$(mktemp -d)"
+  LOG_FILE="${WORK_DIR}/output.log"
+
+  chmod 0777 "${WORK_DIR}"
+  trap remove_work_dir EXIT
+}
+
+# Deletes what lies at least MINIMUM_DEPTH levels below WORK_DIR, as root, since the containers'
+# uids own it. Reports failure on stderr.
+delete_in_work_dir() {
+  docker run --rm --network none --user 0:0 --entrypoint find -v "${WORK_DIR}:/work" "${WORK_IMAGE}" \
+    /work -mindepth "$1" -delete
+}
+
+# Empties every directory directly under WORK_DIR but keeps the directories and LOG_FILE.
+empty_work_subdirectories() {
+  delete_in_work_dir 2
+}
+
+# Removes WORK_DIR, and says so when that fails. Exits with the status the script was already exiting
+# with (or the one passed in), or 1 when the removal failed.
+remove_work_dir() {
+  EXIT_STATUS="${1:-$?}"
+
+  if ! delete_in_work_dir 1
+  then
+    echo "warning: could not empty ${WORK_DIR}" >&2
+    EXIT_STATUS=1
+  fi
+
+  if ! rm -rf "${WORK_DIR}"
+  then
+    echo "warning: could not remove ${WORK_DIR}" >&2
+    EXIT_STATUS=1
+  fi
+
+  exit "${EXIT_STATUS}"
+}
+
+# Wraps a check function so the output saved in LOG_FILE is shown when it fails.
+with_log() {
+  "$@" && return 0
+
+  cat "${LOG_FILE}" >&2
+  return 1
+}
