@@ -231,6 +231,18 @@ trailing_slash_on_target_is_ignored() {
     && [ "$(in_target find /target -mindepth 1 | wc -l | tr -d ' ')" = "1" ]
 }
 
+bare_remote_target_is_joined_without_a_slash() {
+  prepare_directories
+  create_database
+
+  # `home:` aliases /target, and `home:/app.db.zst` would name the filesystem root instead.
+  run_job /data/app.db home: \
+    -e RCLONE_CONFIG_HOME_TYPE=alias \
+    -e RCLONE_CONFIG_HOME_REMOTE=/target \
+    && grep -qF "uploading home:app.db.zst," "${LOG_FILE}" \
+    && in_target test -f /target/app.db.zst
+}
+
 unusual_file_name_is_backed_up() {
   prepare_directories
   in_data sqlite3 "/data/it's a 100%? #db.sqlite" "CREATE TABLE notes(body TEXT); INSERT INTO notes VALUES ('only');" \
@@ -272,6 +284,7 @@ check "an unchanged database is not uploaded again" with_log unchanged_database_
 check "a changed database is uploaded again" with_log changed_database_is_uploaded_again
 check "a crypt target is uploaded every run" with_log crypt_target_is_uploaded_every_run
 check "a trailing slash on BACKUP_TARGET is ignored" with_log trailing_slash_on_target_is_ignored
+check "a bare remote target is joined without a slash" with_log bare_remote_target_is_joined_without_a_slash
 check "a database file name with quotes and URI characters is backed up" with_log unusual_file_name_is_backed_up
 check "--check accepts valid settings without snapshotting or printing" with_log check_accepts_valid_settings_silently
 check "--check rejects a relative database path" with_log check_rejects_a_relative_database_path
