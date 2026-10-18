@@ -93,3 +93,9 @@ ENV RCLONE_CACHE_DIR=/tmp/rclone-cache
 USER 65532:65532
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
+
+FROM base AS files
+
+COPY --chmod=0755 jobs/files /usr/local/bin/backup
+
+LABEL org.opencontainers.image.description="Scheduled rclone mirror of a folder or remote into a versioned bucket"

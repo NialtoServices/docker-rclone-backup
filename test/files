@@ -1,0 +1,139 @@
+#!/bin/sh
+#
+# Tests for the files image, run from anywhere on a host with Docker:
+#
+#   test/files IMAGE
+#
+# Each run's output goes to a log file that is shown only when a check fails.
+
+set -eu
+
+if [ "$#" -ne 1 ]
+then
+  echo "usage: $0 IMAGE" >&2
+  exit 2
+fi
+
+IMAGE="$1"
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# shellcheck source=lib.sh
+. "${TEST_DIR}/lib.sh"
+
+WORK_DIR="$(mktemp -d)"
+SOURCE_DIR="${WORK_DIR}/source"
+TARGET_DIR="${WORK_DIR}/target"
+LOG_FILE="${WORK_DIR}/output.log"
+
+mkdir "${SOURCE_DIR}" "${TARGET_DIR}"
+
+# The container runs as 1000:1000, which owns neither directory.
+chmod 0777 "${SOURCE_DIR}" "${TARGET_DIR}"
+
+# Runs inside the container, because the job leaves files the host user may not be allowed to remove.
+empty_directories() {
+  hardened_run --user 1000:1000 \
+    -v "${SOURCE_DIR}:/source" \
+    -v "${TARGET_DIR}:/target" \
+    "${IMAGE}" find /source /target -mindepth 1 -delete
+}
+
+cleanup() {
+  empty_directories > /dev/null 2>&1 || true
+  rm -rf "${WORK_DIR}"
+}
+
+trap cleanup EXIT
+
+# Runs the job against the mounted directories with the given source and target, followed by any
+# further docker run options. JOB_ARGUMENT, when set, is passed to the job itself.
+run_job() {
+  JOB_SOURCE="$1"
+  JOB_TARGET="$2"
+  shift 2
+
+  hardened_run --user 1000:1000 \
+    -v "${SOURCE_DIR}:/source:ro" \
+    -v "${TARGET_DIR}:/target" \
+    -e "BACKUP_SOURCE=${JOB_SOURCE}" \
+    -e "BACKUP_TARGET=${JOB_TARGET}" \
+    "$@" \
+    "${IMAGE}" /usr/local/bin/backup ${JOB_ARGUMENT:+"${JOB_ARGUMENT}"} > "${LOG_FILE}" 2>&1
+}
+
+# Wraps a check function so the last run's output is shown when it fails.
+with_log() {
+  "$@" && return 0
+
+  cat "${LOG_FILE}" >&2
+  return 1
+}
+
+# Starts each check from a source holding a file and a nested one, and a target holding a file the
+# source lacks.
+prepare_directories() {
+  empty_directories
+  JOB_ARGUMENT=""
+
+  mkdir "${SOURCE_DIR}/nested"
+  echo "alpha" > "${SOURCE_DIR}/alpha.txt"
+  echo "beta" > "${SOURCE_DIR}/nested/beta.txt"
+  echo "stale" > "${TARGET_DIR}/stale.txt"
+  chmod -R a+rX "${SOURCE_DIR}"
+  chmod 0666 "${TARGET_DIR}/stale.txt"
+}
+
+sync_mirrors_source_and_deletes_extras() {
+  prepare_directories
+
+  run_job /source /target \
+    && [ "$(cat "${TARGET_DIR}/alpha.txt")" = "alpha" ] \
+    && [ "$(cat "${TARGET_DIR}/nested/beta.txt")" = "beta" ] \
+    && [ ! -e "${TARGET_DIR}/stale.txt" ]
+}
+
+relative_target_is_refused() {
+  prepare_directories
+
+  ! run_job /source relative/target \
+    && grep -q "relative/target" "${LOG_FILE}" \
+    && [ -e "${TARGET_DIR}/stale.txt" ]
+}
+
+max_delete_caps_deletions() {
+  prepare_directories
+
+  ! run_job /source /target -e RCLONE_MAX_DELETE=0 \
+    && [ -e "${TARGET_DIR}/stale.txt" ]
+}
+
+run_logs_deletion_summary() {
+  prepare_directories
+
+  run_job /source /target \
+    && grep -q "Deleted:" "${LOG_FILE}"
+}
+
+check_accepts_valid_settings_silently() {
+  prepare_directories
+  JOB_ARGUMENT="--check"
+
+  run_job /source /target \
+    && [ ! -s "${LOG_FILE}" ] \
+    && [ -e "${TARGET_DIR}/stale.txt" ]
+}
+
+check_rejects_invalid_settings() {
+  prepare_directories
+  JOB_ARGUMENT="--check"
+
+  ! run_job /source relative/target \
+    && grep -q "relative/target" "${LOG_FILE}"
+}
+
+check "a sync mirrors the source and deletes what the source lacks" with_log sync_mirrors_source_and_deletes_extras
+check "a relative target is refused" with_log relative_target_is_refused
+check "RCLONE_MAX_DELETE caps deletions" with_log max_delete_caps_deletions
+check "the run logs a deletion summary" with_log run_logs_deletion_summary
+check "--check accepts valid settings without syncing or printing" with_log check_accepts_valid_settings_silently
+check "--check rejects invalid settings" with_log check_rejects_invalid_settings
