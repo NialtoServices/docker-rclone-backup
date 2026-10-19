@@ -57,8 +57,10 @@ jobs:
       - lint
     timeout-minutes: 60
 
-    # packages: write is granted by the calling workflow, only when it pushes. A called workflow
-    # can't raise its caller's permissions, so asking for it here would stop CI from starting.
+    # This job declares no permissions: it gets whatever the calling job grants, and a called
+    # workflow can't raise that, so asking for packages: write here would stop CI from starting. A
+    # caller with push: true must grant its calling job both contents: read and packages: write; a
+    # permissions block listing only packages: write drops contents to none and breaks checkout.
     strategy:
       fail-fast: false
       matrix:
@@ -91,7 +93,8 @@ jobs:
 
       # The push below is served from this build's cache. Every input except the labels and
       # attestations must stay identical to these, or the published image is not the one that was
-      # tested.
+      # tested. A publishing run therefore fails when the cache export fails; otherwise the push
+      # would rebuild, and apt-get upgrade could make that a different image.
       - name: Build for testing
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -101,7 +104,7 @@ jobs:
           load: true
           tags: rclone-backup/${{ matrix.image }}:test
           cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
-          cache-to: type=gha,mode=max,ignore-error=true,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,ignore-error=${{ !inputs.push }},scope=${{ env.CACHE_SCOPE }}
       - name: Run the image tests
         env:
           IMAGE: ${{ matrix.image }}
