@@ -214,6 +214,20 @@ backup_restores_on_the_server() {
     && staging_is_empty
 }
 
+# With the newest client's directory empty, the version probe has to fall back to the next major's
+# psql; the run then stops at the missing pg_dump of the server's own major, which proves the probe
+# itself succeeded.
+version_probe_uses_the_newest_installed_client() {
+  prepare
+  mkdir -m 0755 "${WORK_DIR}/no-client"
+
+  ! run_job -v "${WORK_DIR}/no-client:/usr/lib/postgresql/${NEWEST_VERSION}:ro" \
+    && grep -q "PostgreSQL ${NEWEST_VERSION} isn't supported; this image has clients for 15 to 18" "${LOG_FILE}" \
+    && ! grep -q "to read the server's version" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty
+}
+
 unsupported_server_is_refused() {
   prepare
 
@@ -512,6 +526,7 @@ check "--check rejects an unknown DATABASE_TLS value and a CA path without verif
 check "--check rejects a DATABASE_PORT that isn't a positive integer" with_log check_rejects_a_bad_port
 check "--check rejects a DATABASE_TLS_CA_PATH that isn't a readable file" with_log check_rejects_a_missing_ca_file
 check "an unknown DATABASE_ setting is refused" with_log an_unknown_database_setting_is_refused
+check "the version probe uses the newest installed client when the newest major's is missing" with_log version_probe_uses_the_newest_installed_client
 
 stop_server
 start_server "${UNSUPPORTED_VERSION}"

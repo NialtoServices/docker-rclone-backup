@@ -68,12 +68,29 @@ with_connection_environment() {
   )
 }
 
-# Any major's psql can read the version of any server, so the newest does it.
-SERVER_VERSION_NUMBER="$(with_connection_environment "${POSTGRES_BIN_DIRECTORY}/18/bin/psql" -XAtc 'SHOW server_version_num')" \
+# Any major's psql can read the version of any server, so the newest installed does it.
+NEWEST_CLIENT_MAJOR=0
+for CLIENT_DIRECTORY in "${POSTGRES_BIN_DIRECTORY}"/*/
+do
+  CLIENT_MAJOR="${CLIENT_DIRECTORY%/}"
+  CLIENT_MAJOR="${CLIENT_MAJOR##*/}"
+
+  case "${CLIENT_MAJOR}" in
+    "" | *[!0-9]*) continue ;;
+  esac
+
+  [ -x "${CLIENT_DIRECTORY}bin/psql" ] || continue
+
+  [ "${CLIENT_MAJOR}" -le "${NEWEST_CLIENT_MAJOR}" ] || NEWEST_CLIENT_MAJOR="${CLIENT_MAJOR}"
+done
+
+[ "${NEWEST_CLIENT_MAJOR}" -gt 0 ] || fatal "no PostgreSQL client is installed under ${POSTGRES_BIN_DIRECTORY}"
+
+SERVER_VERSION_NUMBER="$(with_connection_environment "${POSTGRES_BIN_DIRECTORY}/${NEWEST_CLIENT_MAJOR}/bin/psql" -XAtc 'SHOW server_version_num')" \
   || fatal "failed to connect to ${DATABASE_HOST}:${SERVER_PORT} as '${DATABASE_USER}' to read the server's version"
 
 case "${SERVER_VERSION_NUMBER}" in
-  "" | *[!0-9]*) fatal "the server at ${DATABASE_HOST}:${SERVER_PORT} reported a version I can't read: '${SERVER_VERSION_NUMBER}'" ;;
+  "" | *[!0-9]*) fatal "the server at ${DATABASE_HOST}:${SERVER_PORT} reported a version that can't be read: '${SERVER_VERSION_NUMBER}'" ;;
 esac
 
 SERVER_MAJOR=$((SERVER_VERSION_NUMBER / 10000))
