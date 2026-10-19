@@ -52,6 +52,25 @@ RUN set -eu; \
 	unzip -j "${archive}" "rclone-v${RCLONE_VERSION}-linux-${TARGETARCH}/rclone"; \
 	chmod 0755 rclone
 
+# PGDG signs its apt repository with the key committed in keys/pgdg.asc. The stage checks that the file
+# holds exactly the one key with PGDG's published fingerprint, so a changed file fails the build, and
+# the postgres image installs the key from here. PGDG's key has no expiry date, so a rotation shows up
+# as a failed build and not as a silent change.
+FROM debian AS pgdg-key
+
+ARG PGDG_SIGNER_FINGERPRINT=B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8
+
+COPY keys/pgdg.asc /tmp/pgdg.asc
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends gpg gpg-agent \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN set -eu; \
+	export GNUPGHOME="$(mktemp -d)"; \
+	gpg --batch --show-keys --with-colons /tmp/pgdg.asc | awk -F: '$1 == "pub" { primary = 1; next } $1 == "fpr" && primary { print $10; primary = 0 }' > /tmp/fingerprints; \
+	[ "$(cat /tmp/fingerprints)" = "${PGDG_SIGNER_FINGERPRINT}" ]
+
 # supercronic's releases publish no checksum file or signature, so each architecture's SHA-256 is
 # pinned here and a version bump is checked by hand against the SHA-1s in the release notes.
 FROM debian AS supercronic
@@ -140,11 +159,11 @@ FROM base AS postgres
 USER 0:0
 
 # Every supported major's client sits side by side under /usr/lib/postgresql/<major>/bin, because a
-# dump must be taken, and listed, by the client of the server's own major. PGDG signs its repository
-# with this key, and ca-certificates, which its HTTPS needs, is already in base.
-RUN mkdir -p /usr/share/postgresql-common/pgdg \
-	&& curl -fsSLo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-	&& echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+# dump must be taken, and listed, by the client of the server's own major. ca-certificates, which the
+# repository's HTTPS needs, is already in base.
+COPY --from=pgdg-key /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+
+RUN echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
 	&& apt-get update \
 	&& apt-get install -y --no-install-recommends postgresql-client-15 postgresql-client-16 postgresql-client-17 postgresql-client-18 \
 	&& rm -rf /var/lib/apt/lists/*
