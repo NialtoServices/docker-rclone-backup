@@ -85,6 +85,7 @@ jobs:
             slug: linux-arm64
     env:
       CACHE_SCOPE: ${{ matrix.image }}-${{ matrix.slug }}
+      PACKAGE_REFRESH: ${{ inputs.push && format('{0}-{1}', github.run_id, github.run_attempt) || 'stable' }}
     steps:
       - name: Check out the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,6 +99,11 @@ jobs:
       # attestations must stay identical to these, or the published image is not the one that was
       # tested. A publishing run therefore fails when the cache export fails; otherwise the push
       # would rebuild, and apt-get upgrade could make that a different image.
+      #
+      # That includes the PACKAGE_REFRESH build argument. A publishing run gives it a value of its
+      # own, so the Dockerfile's apt-get upgrade is never served from an earlier run's cache and
+      # the weekly rebuild installs current packages; the test build and the push read the same job
+      # env, so they share the value. CI keeps a fixed value, and so its cache.
       - name: Build for testing
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
@@ -106,6 +112,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           load: true
           tags: rclone-backup/${{ matrix.image }}:test
+          build-args: PACKAGE_REFRESH=${{ env.PACKAGE_REFRESH }}
           cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
           cache-to: type=gha,mode=max,ignore-error=${{ !inputs.push }},scope=${{ env.CACHE_SCOPE }}
       - name: Run the image tests
@@ -165,6 +172,7 @@ jobs:
           target: ${{ matrix.image }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.labels.outputs.labels }}
+          build-args: PACKAGE_REFRESH=${{ env.PACKAGE_REFRESH }}
           sbom: true
           provenance: mode=max
           cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}

@@ -80,7 +80,14 @@ RUN set -eu; \
 
 FROM debian AS base
 
-RUN apt-get update \
+# A publishing run passes a different value each time, so the layer below is never served from the
+# build cache and every publish, the weekly rebuild included, installs the packages Debian holds
+# that day. CI passes a fixed value and keeps its cache. The value is echoed so that BuildKit counts
+# it as an input of this step. The stages that follow install more packages and rebuild with it.
+ARG PACKAGE_REFRESH=stable
+
+RUN echo "package refresh: ${PACKAGE_REFRESH}" \
+	&& apt-get update \
 	&& apt-get upgrade -y \
 	&& apt-get install -y --no-install-recommends ca-certificates curl procps tini tzdata zstd \
 	&& rm -rf /var/lib/apt/lists/*
