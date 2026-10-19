@@ -103,7 +103,7 @@
       "automerge": false
     },
     {
-      "description": "Each test server line is a supported version series, so only its digest moves; a new series is added by hand, and a major on the dashboard is the prompt to do so",
+      "description": "Each test server line is a supported version series, so only its digest moves; a new series is added by hand as a line of its own",
       "matchFileNames": [
         "test/servers"
       ],
@@ -113,6 +113,22 @@
         "mysql"
       ],
       "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "The MySQL client comes from an LTS release and moves only to the next LTS, by hand; every other newer tag is an innovation release, so only the digest moves",
+      "matchFileNames": [
+        "Dockerfile"
+      ],
+      "matchPackageNames": [
+        "mysql"
+      ],
+      "matchUpdateTypes": [
+        "major",
         "minor",
         "patch"
       ],

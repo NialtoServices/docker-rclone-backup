@@ -77,11 +77,11 @@ file reads as ground truth and so misleads the moment it drifts.
 - **The rclone and PGDG signing keys are pinned by file and fingerprint** (`keys/` and the
   `*_SIGNER_FINGERPRINT` ARGs). A key rotation fails the build until the new key is committed and
   its fingerprint checked against the one its publisher announces.
-- **Renovate offers every newer `mysql` tag, innovation releases included.** The client moves only
-  to the next LTS, so approve or merge nothing else for the Dockerfile's `mysql` stage.
-- **A test server's major on the Dependency Dashboard is a prompt, not a change to approve.** Each
-  `test/servers` line is one supported series, so the pull request would replace that series
-  instead of adding the new one; add the new series' line and tests by hand.
+- **Renovate moves only the digests of the Dockerfile's `mysql` image and the database lines in
+  `test/servers`**, so nothing prompts a version change for them. The MySQL client moves to the next
+  LTS by hand (never to an innovation release), and a new server series gets a `test/servers` line
+  and tests of its own; changing an existing line's version would replace a supported series rather
+  than add one. Watch for new LTS and series releases yourself.
 - **A release whose Publish run never built has no images.** Publish runs one at a time and GitHub
   keeps only one run pending, so a third run cancels the waiting one and two releases published
   close together can leave the earlier without images (a cancelled Publish run in the Actions tab).
