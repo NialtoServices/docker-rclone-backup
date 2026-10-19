@@ -16,6 +16,10 @@
 
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS debian
 
+# Oracle's MySQL clients come from the official image rather than Debian, which carries MariaDB's in
+# their place. The 9.7 LTS client dumps and restores every supported server, 8.0 to 9.x.
+FROM mysql:9.7@sha256:c7cb87a9822f499375287930cbff71d6d3b201e346b45108b1115b435ee2df13 AS mysql-oracle
+
 # The official release zip is verified against the PGP-signed SHA256SUMS, and that signature against
 # the signing key committed in keys/rclone.asc, so a version bump needs no checksum edits.
 FROM debian AS rclone
@@ -177,3 +181,30 @@ USER 65532:65532
 CMD ["/usr/local/bin/start"]
 
 LABEL org.opencontainers.image.description="Scheduled mariadb-dump of one MariaDB database, checked and uploaded to a versioned bucket"
+
+FROM base AS mysql
+
+USER 0:0
+
+# These are the libraries the copied clients link against that base doesn't carry.
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends libncurses6 libssl3t64 libstdc++6 zlib1g \
+	&& rm -rf /var/lib/apt/lists/*
+
+# mysqldump has no connect timeout option, so the job probes the server with the mysql client first.
+# Both are kept out of the PATH and called by absolute path, so nothing can pick up a MariaDB client.
+COPY --from=mysql-oracle /usr/bin/mysql /usr/bin/mysqldump /opt/mysql/bin/
+
+# LD_BIND_NOW makes the dynamic linker resolve every symbol at start-up, so a client with a missing
+# library fails here, at build time, and not at the first run.
+RUN for tool in /opt/mysql/bin/mysql /opt/mysql/bin/mysqldump; do \
+		LD_BIND_NOW=1 "${tool}" --version || exit 1; \
+	done
+
+COPY --chmod=0755 jobs/mysql /usr/local/bin/backup
+
+USER 65532:65532
+
+CMD ["/usr/local/bin/start"]
+
+LABEL org.opencontainers.image.description="Scheduled mysqldump of one MySQL database, checked and uploaded to a versioned bucket"

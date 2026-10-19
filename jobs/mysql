@@ -1,0 +1,102 @@
+#!/bin/sh
+#
+# Dumps DATABASE_NAME with Oracle's mysqldump, compresses and checks the dump and uploads it to
+# BACKUP_TARGET as <DATABASE_NAME>.sql.zst. With --check, validates the settings, prints nothing and
+# exits 0.
+
+set -eu -o pipefail
+
+umask 077
+
+. /usr/local/lib/rclone-backup/log.sh
+. /usr/local/lib/rclone-backup/settings.sh
+. /usr/local/lib/rclone-backup/job.sh
+
+CHECK_ONLY=false
+
+case "${1:-}" in
+  --check) CHECK_ONLY=true ;;
+  "") ;;
+  *) fatal "unknown argument '$1'" ;;
+esac
+
+refuse_unknown_settings DATABASE_HOST DATABASE_PORT DATABASE_USER DATABASE_PASSWORD DATABASE_PASSWORD_FILE DATABASE_NAME DATABASE_TLS DATABASE_TLS_CA_PATH BACKUP_STAGING_PATH
+require_settings DATABASE_HOST DATABASE_USER DATABASE_NAME BACKUP_TARGET
+require_location BACKUP_TARGET
+require_object_name DATABASE_NAME
+require_database_port
+load_database_password
+require_database_tls
+
+if [ "${CHECK_ONLY}" = true ]
+then
+  exit 0
+fi
+
+acquire_run_lock
+open_staging_directory
+
+SERVER_PORT="${DATABASE_PORT:-3306}"
+
+# Runs one of Oracle's MySQL client tools, given as its absolute path followed by its arguments, with
+# the connection settings added. The password reaches the tool through its environment, never its
+# arguments, which any process in the container can read, and the subshell keeps it out of the
+# environment of rclone and everything else the job starts.
+#
+# Unlike MariaDB's, the client's --ssl-mode=REQUIRED refuses a server that offers no TLS, so a
+# connection that comes up under `required` or `verify` is encrypted.
+#
+# Over an unencrypted connection a caching_sha2_password account logs in only by encrypting its
+# password with the server's RSA key, which the client fetches only when told to. Until the server
+# has cached the account's hash, a login without --get-server-public-key is refused.
+run_client_tool() {
+  (
+    TOOL="$1"
+    shift
+
+    export MYSQL_PWD="${DATABASE_PASSWORD}"
+
+    case "${DATABASE_TLS}" in
+      disabled) set -- --ssl-mode=DISABLED --get-server-public-key "$@" ;;
+      required) set -- --ssl-mode=REQUIRED "$@" ;;
+      verify)
+        set -- --ssl-mode=VERIFY_IDENTITY "$@"
+        [ -z "${DATABASE_TLS_CA_PATH:-}" ] || set -- "--ssl-ca=${DATABASE_TLS_CA_PATH}" "$@"
+        ;;
+    esac
+
+    exec "${TOOL}" --host="${DATABASE_HOST}" --port="${SERVER_PORT}" --user="${DATABASE_USER}" "$@"
+  )
+}
+
+# mysqldump has no connect timeout option, so without a probe an unreachable host would hang the run
+# until the operating system gave up on the connection, two minutes or more. The mysql client does
+# have one. The tool's own error, such as a refused login or an account whose authentication plugin
+# the client can't use, reaches the log through standard error.
+run_client_tool /opt/mysql/bin/mysql --connect-timeout=10 --batch --skip-column-names --execute="SELECT 1" > /dev/null \
+  || fatal "failed to connect to ${DATABASE_HOST}:${SERVER_PORT} as '${DATABASE_USER}'"
+
+DUMP_PATH="${STAGING_DIRECTORY}/dump.sql.zst"
+DUMP_STDERR_PATH="${STAGING_DIRECTORY}/dump.stderr"
+
+# The dump is staged and checked before it is uploaded, never streamed into rclone, which would
+# store a truncated dump as the newest version if the tool died part-way. --set-gtid-purged=OFF keeps
+# the server's replication state out of a dump that restores into a different database, and
+# --skip-masking-policies leaves out the 9.x masking policies a community server can't dump.
+info "dumping ${DATABASE_NAME} from ${DATABASE_HOST}:${SERVER_PORT}"
+DUMP_FAILED=false
+run_client_tool /opt/mysql/bin/mysqldump --single-transaction --quick --routines --events --triggers --no-tablespaces \
+  --skip-dump-date --default-character-set=utf8mb4 --set-gtid-purged=OFF --skip-masking-policies \
+  "${DATABASE_NAME}" 2> "${DUMP_STDERR_PATH}" \
+  | zstd -q -o "${DUMP_PATH}" \
+  || DUMP_FAILED=true
+
+# The 9.x client can print an error and still exit 0, so its error lines fail the run whatever its status.
+fail_on_error_lines "${DUMP_STDERR_PATH}" mysqldump
+[ "${DUMP_FAILED}" = false ] || fatal "failed to dump ${DATABASE_NAME}"
+
+zstd -q --test "${DUMP_PATH}" || fatal "the dump of ${DATABASE_NAME} can't be read back"
+
+upload_staged_file "${DUMP_PATH}" "${DATABASE_NAME}.sql.zst"
+
+info "backup complete: ${DATABASE_NAME} -> ${BACKUP_TARGET}"

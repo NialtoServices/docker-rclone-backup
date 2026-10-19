@@ -316,6 +316,82 @@ mariadb --user root --execute 'CREATE DATABASE restored'
 zstd -dc app.sql.zst | mariadb --user root restored
 ```
 
+## MySQL
+
+The `mysql` image dumps one MySQL database with Oracle's `mysqldump`, compresses it with zstd and uploads it to the target as `<database>.sql.zst` (`app.sql.zst` for a database called `app`). Servers 8.0, 8.4 and 9.x are supported, all by the one client the image carries, MySQL 9.7's. The compressed dump is checked with `zstd --test` before it is uploaded, and a dump that fails the check, or whose client printed an error, is not uploaded.
+
+| Variable | Description |
+|---|---|
+| `DATABASE_HOST` | The server's host name or address |
+| `DATABASE_PORT` | The server's port, a positive integer. Defaults to `3306` |
+| `DATABASE_USER` | The account to connect as; see [the backup account](#the-backup-account-1) |
+| `DATABASE_PASSWORD` | The account's password. Set this or `DATABASE_PASSWORD_FILE`, not both |
+| `DATABASE_PASSWORD_FILE` | The path of a file holding the password, such as a Docker or Compose secret, so it needn't sit in the container's environment. A trailing newline, or a carriage return before it, is ignored |
+| `DATABASE_NAME` | The database to dump. It becomes the object's name, so it must not contain `/` or start with `.` or `-` |
+| `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate, and fails the run against a server that offers no TLS; `verify` also checks the certificate and that it names the server's host. Set `required` or `verify` for a managed database or any server across an untrusted network |
+| `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA; it must be a readable file. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
+| `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
+| `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the settings below, so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
+
+Passwords with any characters work, and the password reaches `mysqldump` through its environment, never its arguments. Neither it nor any other connection detail is passed on to rclone. The official `mysql` image's own variables (`MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE` and the rest) are ignored, so an env file shared with the database container can't change which account or database is backed up.
+
+- **The account must use `caching_sha2_password`.** That is the default on every supported server, but the 9.7 client has no `mysql_native_password` plugin, so an account created with it fails the run with `Authentication plugin 'mysql_native_password' cannot be loaded`, and nothing is uploaded. Recreate such an account, or give the backup its own, with the default plugin.
+- **Versioning is the history.** Each upload replaces the object at the target, so keep older dumps by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
+- **An unchanged database adds no version.** The dump leaves out its own timestamp and zstd's output is deterministic, so a dump identical to the object already at the target is skipped by the checksum comparison. A target that can't report a checksum, such as a `crypt` remote, is uploaded on every run instead, and adds a version each time.
+- **Avoid schema migrations during a backup.** `--single-transaction` gives the dump a consistent view of the data, but it doesn't isolate the dump from a migration that changes tables while it runs. Schedule the backup away from migrations.
+- **The dump carries no replication state or masking policies.** It is taken with `--set-gtid-purged=OFF`, so it restores into a server with other transactions, and with `--skip-masking-policies`, because the 9.x client otherwise prints an error for them on a community server. Any line the client prints with `error` in it fails the run even when the client exits 0.
+- **An unreachable server fails the run.** The image connects once before dumping, with a 10-second timeout, because `mysqldump` has no timeout of its own and would otherwise wait on the operating system for minutes.
+- **Without TLS the password travels RSA-encrypted.** With `DATABASE_TLS=disabled` the image asks the server for its RSA public key, which `caching_sha2_password` needs to log in over an unencrypted connection until the server has cached the account. That protects the password, not the data, and a connection across a network you don't trust needs `required` or `verify`.
+
+### The backup account
+
+Give the image an account of its own, not the application's or root. It needs `SELECT`, `SHOW VIEW`, `TRIGGER` and `EVENT` on the database, plus `SHOW_ROUTINE`, which lets it read stored routines. `SHOW_ROUTINE` is a global privilege, available from MySQL 8.0.20:
+
+```sql
+CREATE USER 'backup'@'%' IDENTIFIED BY '<password>';
+GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON app.* TO 'backup'@'%';
+GRANT SHOW_ROUTINE ON *.* TO 'backup'@'%';
+```
+
+**Without `SHOW_ROUTINE` the dump silently leaves out every stored procedure and function, and the run still succeeds.** Neither the client nor the image reports it, and the backup looks complete until a restore finds the routines missing. Check by listing the routines in the dump: `zstd -dc app.sql.zst | grep -E '^CREATE .*(PROCEDURE|FUNCTION)'`.
+
+### Running it
+
+The image needs no volume and no particular uid, because everything it uses is reached over the network. Run it beside the database on a private network:
+
+```yaml
+services:
+  backup:
+    image: ghcr.io/nialtoservices/rclone-backup/mysql
+    stop_grace_period: 2m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,nodev,noexec,nosuid,size=512m
+    secrets:
+      - backup_password
+    environment:
+      DATABASE_HOST: database
+      DATABASE_USER: backup
+      DATABASE_PASSWORD_FILE: /run/secrets/backup_password
+      DATABASE_NAME: app
+      BACKUP_TARGET: b2:my-bucket/app
+      BACKUP_SCHEDULE: "0 3 * * *"
+      RCLONE_CONFIG_B2_TYPE: b2
+      RCLONE_CONFIG_B2_ACCOUNT: <application key id>
+      RCLONE_CONFIG_B2_KEY: <application key>
+```
+
+### Restoring
+
+Download the object from the target, create an empty database and restore into it with the `mysql` client of your server's own version, as an account that may create the dump's objects (its routines and triggers keep their original definers, so `root` is the safe choice). The dump restores to any server from 8.0 on:
+
+```sh
+mysql --user root --execute 'CREATE DATABASE restored'
+zstd -dc app.sql.zst | mysql --user root restored
+```
+
 ## Licence
 
 This project is licensed under the Apache-2.0 License - see the LICENSE file for details.

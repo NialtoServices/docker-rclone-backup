@@ -1,0 +1,680 @@
+#!/bin/sh
+#
+# Tests for the mysql image, run from anywhere on a host with Docker:
+#
+#   test/mysql IMAGE
+#
+# Backs up and restores a seeded database on every supported server in test/servers, then checks the
+# image's refusals and failure modes once, against the newest server. Each run's output goes to a log
+# file that is shown only when a check fails.
+
+# The single-quoted scripts passed to `sh -c` expand inside the container, not on the host.
+# shellcheck disable=SC2016
+
+set -eu
+
+if [ "$#" -ne 1 ]
+then
+  echo "usage: $0 IMAGE" >&2
+  exit 2
+fi
+
+IMAGE="$1"
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# shellcheck source=lib.sh
+. "${TEST_DIR}/lib.sh"
+
+make_work_dir "${IMAGE}"
+
+TARGET_DIR="${WORK_DIR}/target"
+STAGING_DIR="${WORK_DIR}/staging"
+SECRETS_DIR="${WORK_DIR}/secrets"
+
+mkdir -m 0777 "${TARGET_DIR}" "${STAGING_DIR}" "${SECRETS_DIR}"
+
+NETWORK_NAME="mysql-test-$$"
+SERVER_NAME="mysql-server-$$"
+TLS_SERVER_NAME="mysql-tls-$$"
+
+SERVER_VERSIONS="8.0 8.4 9.7"
+OLDEST_VERSION=8.0
+NEWEST_VERSION=9.7
+
+# The newest server that can still create a mysql_native_password account, which the 9.7 client can't
+# log in with.
+NATIVE_PASSWORD_VERSION=8.4
+
+ADMIN_PASSWORD="admin-secret"
+BACKUP_USER_PASSWORD="backup-secret"
+
+# Single quotes, a double quote, a space, `$`, `;` and a trailing backslash.
+# shellcheck disable=SC1003
+SPECIAL_PASSWORD='p@ss w'\''rd"$;\'
+
+# How long a server may take to start accepting connections. Generous, because the host may be busy.
+SERVER_START_SECONDS=300
+
+# Set by start_server.
+SERVER_IMAGE=""
+
+docker network create "${NETWORK_NAME}" > /dev/null
+
+stop_server() {
+  docker rm --force "${SERVER_NAME}" "${TLS_SERVER_NAME}" > /dev/null 2>&1 || true
+}
+
+# Removes the servers and the network before the work directory goes, and keeps the exit status the
+# script was already exiting with.
+clean_up() {
+  EXIT_STATUS=$?
+
+  stop_server
+  docker network rm "${NETWORK_NAME}" > /dev/null 2>&1 || true
+  remove_work_dir "${EXIT_STATUS}"
+}
+
+trap clean_up EXIT
+
+server_image_for() {
+  grep "^mysql:$1@" "${TEST_DIR}/servers"
+}
+
+# Runs SQL as the superuser on the container $1. Connecting over TCP is what tells the server that
+# is ready from the temporary one the image starts first, which listens on a socket only.
+# --get-server-public-key lets a caching_sha2_password login work on the server without TLS.
+sql_on() {
+  docker exec -e "MYSQL_PWD=${ADMIN_PASSWORD}" "$1" mysql -h 127.0.0.1 -u root --get-server-public-key --batch --skip-column-names -e "$2"
+}
+
+server_sql() {
+  sql_on "${SERVER_NAME}" "$1"
+}
+
+# Retries a query once a second for SERVER_START_SECONDS.
+wait_for_server() {
+  ATTEMPT=1
+  while [ "${ATTEMPT}" -le "${SERVER_START_SECONDS}" ]
+  do
+    sql_on "$1" "SELECT 1" > /dev/null 2>&1 && return 0
+
+    sleep 1
+    ATTEMPT=$((ATTEMPT + 1))
+  done
+
+  return 1
+}
+
+# Creates the database app, with the backup user and the grants the README asks for, on the container
+# $1.
+create_app_database() {
+  sql_on "$1" "
+    CREATE DATABASE app;
+    CREATE USER 'backup'@'%' IDENTIFIED BY '${BACKUP_USER_PASSWORD}';
+    GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON app.* TO 'backup'@'%';
+    GRANT SHOW_ROUTINE ON *.* TO 'backup'@'%';
+  " > /dev/null
+}
+
+# Starts the server for VERSION and seeds the database app: a table of 1000 rows with a trigger and a
+# stored procedure. Object definitions don't name the database, because a dump stores their text and
+# the restore goes into a different one.
+#
+# The oldest server has TLS switched off, which is how the checks see a refused `required`. The one
+# that can create a mysql_native_password account is told to keep that plugin, which 8.4 ships
+# switched off.
+start_server() {
+  SERVER_IMAGE="$(server_image_for "$1")"
+
+  case "$1" in
+    "${OLDEST_VERSION}") set -- --auto_generate_certs=OFF ;;
+    "${NATIVE_PASSWORD_VERSION}") set -- --mysql-native-password=ON ;;
+    *) set -- ;;
+  esac
+
+  stop_server
+
+  docker run --detach --name "${SERVER_NAME}" --network "${NETWORK_NAME}" \
+    -e "MYSQL_ROOT_PASSWORD=${ADMIN_PASSWORD}" "${SERVER_IMAGE}" "$@" > /dev/null \
+    && wait_for_server "${SERVER_NAME}" \
+    && create_app_database "${SERVER_NAME}" \
+    && server_sql "
+      USE app;
+      CREATE TABLE notes (id INT AUTO_INCREMENT PRIMARY KEY, body VARCHAR(100) NOT NULL);
+      CREATE TRIGGER mark_note BEFORE INSERT ON notes FOR EACH ROW SET NEW.body = CONCAT(NEW.body, ' (marked)');
+      INSERT INTO notes (body) WITH RECURSIVE numbers AS (SELECT 1 AS number UNION ALL SELECT number + 1 FROM numbers WHERE number < 1000) SELECT CONCAT('row ', number) FROM numbers;
+      CREATE PROCEDURE count_notes() SELECT COUNT(*) FROM notes;
+    " > /dev/null
+}
+
+# Runs the server image's own client against the server as the superuser, reading SQL from standard
+# input. The restore uses the tool that ships with the server, as a user restoring would.
+server_client() {
+  docker run --rm --interactive --network "${NETWORK_NAME}" --user 1000:1000 \
+    -e "MYSQL_PWD=${ADMIN_PASSWORD}" \
+    --entrypoint mysql "${SERVER_IMAGE}" --host "${SERVER_NAME}" --user root --get-server-public-key "$@"
+}
+
+# Runs a container from the image under the hardening baseline, with the connection settings of the
+# seeded server and the mounted directories. Further docker run options, the image and the command
+# follow; a repeated -e overrides the default.
+run_container() {
+  hardened_run --user 1000:1000 \
+    --network "${NETWORK_NAME}" \
+    -v "${TARGET_DIR}:/target" \
+    -v "${STAGING_DIR}:/staging" \
+    -v "${SECRETS_DIR}:/secrets:ro" \
+    -e "DATABASE_HOST=${SERVER_NAME}" \
+    -e DATABASE_USER=backup \
+    -e DATABASE_NAME=app \
+    -e BACKUP_TARGET=/target \
+    "$@"
+}
+
+# Runs the job with the backup user's password, plus any further docker run options. JOB_ARGUMENT,
+# when set, is passed to the job itself.
+run_job() {
+  run_container -e "DATABASE_PASSWORD=${BACKUP_USER_PASSWORD}" "$@" \
+    "${IMAGE}" /usr/local/bin/backup ${JOB_ARGUMENT:+"${JOB_ARGUMENT}"} > "${LOG_FILE}" 2>&1
+}
+
+# The job writes with mode 0600, so the host user can't read the target itself. This runs a command
+# in a container that sees it as the application does.
+in_target() {
+  hardened_run --user 1000:1000 -v "${TARGET_DIR}:/target:ro" "${IMAGE}" "$@"
+}
+
+target_is_empty() {
+  in_target sh -c '[ -z "$(find /target -mindepth 1)" ]'
+}
+
+staging_is_empty() {
+  hardened_run --user 1000:1000 -v "${STAGING_DIR}:/staging:ro" "${IMAGE}" sh -c '[ -z "$(find /staging -mindepth 1)" ]'
+}
+
+# Prints the inode and modification time of every file under the target.
+target_fingerprint() {
+  in_target find /target -type f -exec stat -c '%i %Y %n' {} +
+}
+
+# Starts each check from empty directories and the default settings.
+prepare() {
+  empty_work_subdirectories
+  JOB_ARGUMENT=""
+}
+
+set_backup_password() {
+  server_sql "ALTER USER 'backup'@'%' IDENTIFIED BY '$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/''/g")'" > /dev/null
+}
+
+# Prints what database $1 holds: the checksum of its table, the routine and the trigger.
+inspect_database() {
+  server_sql "
+    CHECKSUM TABLE $1.notes;
+    SELECT routine_name FROM information_schema.routines WHERE routine_schema = '$1';
+    SELECT trigger_name FROM information_schema.triggers WHERE trigger_schema = '$1';
+  " | cut -f 2
+}
+
+# Restores /target/app.sql.zst into a new database called restored.
+restore_dump() {
+  server_sql "DROP DATABASE IF EXISTS restored; CREATE DATABASE restored" > /dev/null \
+    && in_target zstd -dc /target/app.sql.zst | server_client restored
+}
+
+backup_restores_on_the_server() {
+  prepare
+
+  run_job \
+    && restore_dump \
+    && [ "$(inspect_database restored)" = "$(inspect_database app)" ] \
+    && inspect_database restored | grep -qx count_notes \
+    && inspect_database restored | grep -qx mark_note \
+    && staging_is_empty
+}
+
+# Without the routine privilege, mysqldump leaves the routines out and still succeeds, so a backup
+# that omits them is exactly what the README warns about; this proves the grant used here is the one
+# that matters.
+routines_need_the_routine_privilege() {
+  prepare
+  server_sql "REVOKE SHOW_ROUTINE ON *.* FROM 'backup'@'%'" > /dev/null
+
+  run_job \
+    && ! in_target zstd -dc /target/app.sql.zst | grep -q count_notes
+}
+
+required_tls_works_against_a_server_that_generates_a_certificate() {
+  prepare
+
+  run_job -e DATABASE_TLS=required \
+    && in_target test -f /target/app.sql.zst
+}
+
+required_tls_against_a_server_without_tls_fails_clearly() {
+  prepare
+
+  ! run_job -e DATABASE_TLS=required \
+    && grep -q "SSL is required" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty
+}
+
+# The 9.7 client has no mysql_native_password plugin, so such an account can't be backed up whatever
+# the server allows. The failure has to say why, and has to leave nothing behind.
+native_password_account_fails_clearly() {
+  prepare
+  sql_on "${SERVER_NAME}" "
+    CREATE USER 'legacy'@'%' IDENTIFIED WITH mysql_native_password BY '${BACKUP_USER_PASSWORD}';
+    GRANT SELECT ON app.* TO 'legacy'@'%';
+  " > /dev/null
+
+  ! run_job -e DATABASE_USER=legacy \
+    && grep -q "mysql_native_password" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty
+}
+
+unchanged_database_is_not_uploaded_again() {
+  prepare
+
+  run_job \
+    && FIRST_FINGERPRINT="$(target_fingerprint)" \
+    && [ -n "${FIRST_FINGERPRINT}" ] \
+    && sleep 1 \
+    && run_job \
+    && [ "$(target_fingerprint)" = "${FIRST_FINGERPRINT}" ]
+}
+
+changed_database_is_uploaded_again() {
+  prepare
+
+  run_job \
+    && FIRST_FINGERPRINT="$(target_fingerprint)" \
+    && server_sql "INSERT INTO app.notes (body) VALUES ('another')" > /dev/null \
+    && sleep 1 \
+    && run_job \
+    && [ "$(target_fingerprint)" != "${FIRST_FINGERPRINT}" ]
+}
+
+failing_dump_uploads_nothing() {
+  prepare
+
+  ! run_job -e DATABASE_NAME=missing \
+    && grep -qi "error" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty
+}
+
+# Samples every process's arguments while the job runs, holding a table lock so mysqldump stays
+# alive long enough to be seen, then releases it. The job's own tools are the only processes the
+# sampler can see besides itself.
+password_with_shell_characters_works_and_stays_out_of_arguments() {
+  prepare
+  set_backup_password "${SPECIAL_PASSWORD}"
+
+  run_container -e "DATABASE_PASSWORD=${SPECIAL_PASSWORD}" -e "ADMIN_PASSWORD=${ADMIN_PASSWORD}" "${IMAGE}" sh -c '
+    admin_sql() {
+      MYSQL_PWD="${ADMIN_PASSWORD}" /opt/mysql/bin/mysql -h "${DATABASE_HOST}" -u root --ssl-mode=DISABLED --get-server-public-key --batch --skip-column-names -e "$1"
+    }
+
+    holder_ids() {
+      admin_sql "SELECT id FROM information_schema.processlist WHERE info = '\''SELECT SLEEP(600)'\''"
+    }
+
+    admin_sql "LOCK TABLES app.notes WRITE; SELECT SLEEP(600)" > /dev/null 2>&1 &
+
+    until [ -n "$(holder_ids)" ]
+    do
+      sleep 0.2
+    done
+
+    : > /tmp/arguments
+    /usr/local/bin/backup > /tmp/job.log 2>&1 &
+    job=$!
+    seen=false
+
+    while kill -0 "${job}" 2> /dev/null
+    do
+      cat /proc/[0-9]*/cmdline >> /tmp/arguments 2> /dev/null
+
+      if [ "${seen}" = false ] && grep -aq "mysql[d]ump" /tmp/arguments
+      then
+        seen=true
+        admin_sql "KILL CONNECTION $(holder_ids)" > /dev/null
+      fi
+
+      sleep 0.1
+    done
+
+    wait "${job}"
+    status=$?
+
+    grep -aqF "${DATABASE_PASSWORD}" /tmp/arguments && echo PASSWORD_WAS_IN_ARGUMENTS
+    [ "${seen}" = true ] || echo MYSQLDUMP_WAS_NEVER_SEEN
+    cat /tmp/job.log
+    exit "${status}"
+  ' > "${LOG_FILE}" 2>&1 \
+    && ! grep -q -e PASSWORD_WAS_IN_ARGUMENTS -e MYSQLDUMP_WAS_NEVER_SEEN "${LOG_FILE}" \
+    && restore_dump \
+    && [ "$(inspect_database restored)" = "$(inspect_database app)" ] \
+    && set_backup_password "${BACKUP_USER_PASSWORD}"
+}
+
+password_file_works() {
+  prepare
+  printf '%s\n' "${BACKUP_USER_PASSWORD}" > "${SECRETS_DIR}/password"
+
+  run_container -e DATABASE_PASSWORD_FILE=/secrets/password "${IMAGE}" /usr/local/bin/backup > "${LOG_FILE}" 2>&1 \
+    && restore_dump
+}
+
+password_file_with_windows_line_ending_works() {
+  prepare
+  printf '%s\r\n' "${BACKUP_USER_PASSWORD}" > "${SECRETS_DIR}/password"
+
+  run_container -e DATABASE_PASSWORD_FILE=/secrets/password "${IMAGE}" /usr/local/bin/backup > "${LOG_FILE}" 2>&1 \
+    && restore_dump
+}
+
+# Runs the job with rclone replaced by a recorder of its environment, and checks that nothing from
+# the connection reached it: not the password and no MYSQL_PWD. The password goes to the checking
+# script as an argument, so it never joins the script's own environment.
+rclone_environment_holds_no_connection_secret() {
+  write_rclone_environment_recorder "${WORK_DIR}/rclone-recorder"
+
+  for PASSWORD_SETTING in DATABASE_PASSWORD_FILE=/secrets/password "DATABASE_PASSWORD=${BACKUP_USER_PASSWORD}"
+  do
+    prepare
+    printf '%s\n' "${BACKUP_USER_PASSWORD}" > "${SECRETS_DIR}/password"
+
+    run_container -v "${WORK_DIR}/rclone-recorder:/usr/local/sbin/rclone:ro" -e "${PASSWORD_SETTING}" \
+      "${IMAGE}" sh -c '
+        /usr/local/bin/backup
+        status=$?
+
+        [ -s /tmp/rclone-environment ] || echo RCLONE_WAS_NEVER_RUN
+        grep -aq "^MYSQL_PWD=" /tmp/rclone-environment && echo MYSQL_PWD_REACHED_RCLONE
+        grep -aqF -e "$1" /tmp/rclone-environment && echo THE_PASSWORD_REACHED_RCLONE
+        exit "${status}"
+      ' sh "${BACKUP_USER_PASSWORD}" > "${LOG_FILE}" 2>&1 \
+      && ! grep -q -e RCLONE_WAS_NEVER_RUN -e MYSQL_PWD_REACHED_RCLONE -e THE_PASSWORD_REACHED_RCLONE "${LOG_FILE}" \
+      || return 1
+  done
+}
+
+both_password_forms_are_refused() {
+  prepare
+  printf '%s\n' "${BACKUP_USER_PASSWORD}" > "${SECRETS_DIR}/password"
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_PASSWORD_FILE=/secrets/password \
+    && grep -q "DATABASE_PASSWORD_FILE" "${LOG_FILE}" \
+    && ! run_container -e DATABASE_PASSWORD=x -e DATABASE_PASSWORD_FILE=/secrets/password \
+      "${IMAGE}" /usr/local/bin/backup > "${LOG_FILE}" 2>&1 \
+    && grep -q "not both" "${LOG_FILE}"
+}
+
+unreadable_password_file_is_refused() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_container -e DATABASE_PASSWORD_FILE=/secrets/missing "${IMAGE}" /usr/local/bin/backup --check > "${LOG_FILE}" 2>&1 \
+    && grep -q "/secrets/missing" "${LOG_FILE}"
+}
+
+missing_password_is_refused() {
+  prepare
+
+  ! run_container "${IMAGE}" /usr/local/bin/backup --check > "${LOG_FILE}" 2>&1 \
+    && grep -q "DATABASE_PASSWORD" "${LOG_FILE}"
+}
+
+unsafe_database_names_are_refused() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_NAME=nested/app \
+    && grep -q "nested/app" "${LOG_FILE}" \
+    && ! run_job -e DATABASE_NAME=.hidden \
+    && grep -q "\.hidden" "${LOG_FILE}" \
+    && ! run_job -e DATABASE_NAME=--help \
+    && grep -q -e "--help" "${LOG_FILE}"
+}
+
+unreachable_host_fails_within_a_minute() {
+  prepare
+  START_SECONDS="$(date +%s)"
+
+  # 192.0.2.0/24 is reserved for documentation, so nothing answers there.
+  ! run_job -e DATABASE_HOST=192.0.2.1 \
+    && [ "$(($(date +%s) - START_SECONDS))" -lt 60 ] \
+    && grep -q "192.0.2.1" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty
+}
+
+# The official database image reads MYSQL_ variables, so an env file shared with the
+# server container carries them. They must change nothing here: not the account, not the database.
+shared_server_variables_are_ignored() {
+  prepare
+
+  run_job -e MYSQL_ROOT_PASSWORD=wrong -e MYSQL_USER=wrong -e MYSQL_PASSWORD=wrong -e MYSQL_DATABASE=wrong \
+    -e MYSQL_PWD=wrong -e MYSQL_HOST=wrong -e MYSQL_TCP_PORT=1 \
+    && restore_dump \
+    && [ "$(inspect_database restored)" = "$(inspect_database app)" ]
+}
+
+# Starts a second server with a self-signed certificate for its own name, and leaves the certificate
+# in WORK_DIR as ca.crt and an unrelated one as other-ca.crt. prepare empties SECRETS_DIR, so a check
+# copies them there after preparing.
+start_tls_server() {
+  docker run --detach --name "${TLS_SERVER_NAME}" --network "${NETWORK_NAME}" \
+    -e "MYSQL_ROOT_PASSWORD=${ADMIN_PASSWORD}" -e "TLS_SERVER_NAME=${TLS_SERVER_NAME}" \
+    --entrypoint sh "${SERVER_IMAGE}" -c '
+      openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=${TLS_SERVER_NAME}" \
+        -addext "subjectAltName=DNS:${TLS_SERVER_NAME}" -keyout /tmp/server.key -out /tmp/server.crt 2> /dev/null \
+        && openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=other" \
+          -keyout /tmp/other.key -out /tmp/other.crt 2> /dev/null \
+        && chown mysql:mysql /tmp/server.key /tmp/server.crt \
+        && chmod 0600 /tmp/server.key \
+        && exec docker-entrypoint.sh mysqld --ssl-ca=/tmp/server.crt --ssl-cert=/tmp/server.crt --ssl-key=/tmp/server.key
+    ' > /dev/null \
+    && wait_for_server "${TLS_SERVER_NAME}" \
+    && create_app_database "${TLS_SERVER_NAME}" \
+    && sql_on "${TLS_SERVER_NAME}" "CREATE TABLE app.notes (id INT PRIMARY KEY)" > /dev/null \
+    && docker cp "${TLS_SERVER_NAME}:/tmp/server.crt" "${WORK_DIR}/ca.crt" \
+    && docker cp "${TLS_SERVER_NAME}:/tmp/other.crt" "${WORK_DIR}/other-ca.crt" \
+    && chmod 0644 "${WORK_DIR}/ca.crt" "${WORK_DIR}/other-ca.crt"
+}
+
+tls_required_and_verify_work_against_a_server_with_tls() {
+  start_tls_server \
+    && prepare \
+    && cp "${WORK_DIR}/ca.crt" "${WORK_DIR}/other-ca.crt" "${SECRETS_DIR}/" \
+    && run_job -e "DATABASE_HOST=${TLS_SERVER_NAME}" -e DATABASE_TLS=required \
+    && in_target test -f /target/app.sql.zst \
+    && prepare \
+    && cp "${WORK_DIR}/ca.crt" "${WORK_DIR}/other-ca.crt" "${SECRETS_DIR}/" \
+    && run_job -e "DATABASE_HOST=${TLS_SERVER_NAME}" -e DATABASE_TLS=verify -e DATABASE_TLS_CA_PATH=/secrets/ca.crt \
+    && in_target test -f /target/app.sql.zst \
+    && prepare \
+    && cp "${WORK_DIR}/ca.crt" "${WORK_DIR}/other-ca.crt" "${SECRETS_DIR}/" \
+    && ! run_job -e "DATABASE_HOST=${TLS_SERVER_NAME}" -e DATABASE_TLS=verify -e DATABASE_TLS_CA_PATH=/secrets/other-ca.crt \
+    && grep -qi "certificate" "${LOG_FILE}" \
+    && target_is_empty
+}
+
+# Everything the job leaves in /tmp besides its lock and rclone's cache is staged data. The check runs
+# inside the container, since the tmpfs goes with it.
+dump_larger_than_the_staging_space_fails_cleanly() {
+  prepare
+  server_sql "
+    USE app;
+    SET SESSION cte_max_recursion_depth = 100000;
+    CREATE TABLE app.padding AS WITH RECURSIVE numbers AS (SELECT 1 AS id UNION ALL SELECT id + 1 FROM numbers WHERE id < 80000)
+      SELECT id, CONCAT(SHA2(id, 256), SHA2(id + 1, 256)) AS filler FROM numbers;
+  " > /dev/null
+
+  JOB_STATUS=0
+  HARDENED_TMPFS_SIZE=1m run_container -e "DATABASE_PASSWORD=${BACKUP_USER_PASSWORD}" "${IMAGE}" sh -c '
+    /usr/local/bin/backup
+    status=$?
+
+    [ -z "$(find /tmp -mindepth 1 -not -name rclone-backup.lock -not -path "/tmp/rclone-cache*")" ] || echo STAGED_FILE_LEFT_BEHIND
+    exit "${status}"
+  ' > "${LOG_FILE}" 2>&1 || JOB_STATUS=$?
+
+  server_sql "DROP TABLE app.padding" > /dev/null
+
+  [ "${JOB_STATUS}" -ne 0 ] \
+    && grep -q "failed to dump app" "${LOG_FILE}" \
+    && ! grep -q STAGED_FILE_LEFT_BEHIND "${LOG_FILE}" \
+    && target_is_empty
+}
+
+check_accepts_valid_settings_silently() {
+  prepare
+  JOB_ARGUMENT="--check"
+  : > "${SECRETS_DIR}/ca.crt"
+
+  run_job -e DATABASE_TLS=verify -e DATABASE_TLS_CA_PATH=/secrets/ca.crt -e DATABASE_PORT=3306 \
+    && [ ! -s "${LOG_FILE}" ] \
+    && target_is_empty
+}
+
+check_rejects_bad_tls_settings() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_TLS=sometimes \
+    && grep -q "sometimes" "${LOG_FILE}" \
+    && ! run_job -e DATABASE_TLS_CA_PATH=/secrets/ca.crt \
+    && grep -q "DATABASE_TLS_CA_PATH" "${LOG_FILE}"
+}
+
+check_rejects_a_missing_ca_file() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_TLS=verify -e DATABASE_TLS_CA_PATH=/secrets/missing.crt \
+    && grep -q "/secrets/missing.crt" "${LOG_FILE}"
+}
+
+check_rejects_a_bad_port() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  for PORT in abc 0 -1 33.06
+  do
+    ! run_job -e "DATABASE_PORT=${PORT}" \
+      && grep -q "DATABASE_PORT" "${LOG_FILE}" \
+      || return 1
+  done
+}
+
+an_unknown_database_setting_is_refused() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_PASWORD=typo \
+    && grep -q "DATABASE_PASWORD" "${LOG_FILE}"
+}
+
+# Runs the job with mysqldump replaced by a script that writes a dump and the stderr line in $1, then
+# exits 0, as the 9.x client does when it can't dump a masking policy. The script is mounted over the
+# real binary, which the job always calls by absolute path.
+run_job_with_fake_mysqldump() {
+  printf '#!/bin/sh\necho "-- fake dump"\necho "%s" >&2\nexit 0\n' "$1" > "${WORK_DIR}/fake-mysqldump"
+  chmod 0755 "${WORK_DIR}/fake-mysqldump"
+
+  run_job -v "${WORK_DIR}/fake-mysqldump:/opt/mysql/bin/mysqldump:ro"
+}
+
+# The fake's stderr line alone decides the outcome, so a job that passes with a warning and fails with
+# an error line shows that the line, and not the fake, fails the run.
+error_line_from_a_tool_that_exits_zero_fails_the_run() {
+  prepare
+
+  run_job_with_fake_mysqldump "mysqldump: [Warning] harmless" \
+    && in_target test -f /target/app.sql.zst \
+    && prepare \
+    && ! run_job_with_fake_mysqldump "mysqldump: Error: masking policies are not available" \
+    && grep -q "mysqldump reported an error" "${LOG_FILE}" \
+    && grep -q "masking policies are not available" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty
+}
+
+# Calls the shared helper directly, as a second proof that matching an error line is what stops the run.
+fail_on_error_lines_stops_on_an_error_line_only() {
+  hardened_run --user 1000:1000 "${IMAGE}" sh -c '
+    . /usr/local/lib/rclone-backup/log.sh
+    . /usr/local/lib/rclone-backup/job.sh
+
+    printf "%s\n" "mysqldump: [Warning] harmless" > /tmp/warning.stderr
+    printf "%s\n" "mysqldump: Error: something" > /tmp/error.stderr
+    printf "%s" "mysqldump: ERROR 1045 without a final newline" > /tmp/unterminated.stderr
+
+    (fail_on_error_lines /tmp/warning.stderr mysqldump) || echo THE_WARNING_FAILED
+    (fail_on_error_lines /tmp/error.stderr mysqldump) && echo THE_ERROR_PASSED
+    (fail_on_error_lines /tmp/unterminated.stderr mysqldump) && echo THE_UNTERMINATED_ERROR_PASSED
+    : > /tmp/empty.stderr
+    (fail_on_error_lines /tmp/empty.stderr mysqldump) || echo THE_EMPTY_FILE_FAILED
+    exit 0
+  ' > "${LOG_FILE}" 2>&1 \
+    && ! grep -q -e THE_WARNING_FAILED -e THE_ERROR_PASSED -e THE_UNTERMINATED_ERROR_PASSED -e THE_EMPTY_FILE_FAILED "${LOG_FILE}" \
+    && grep -q "mysqldump reported an error" "${LOG_FILE}"
+}
+
+LAST_VERSION="${SERVER_VERSIONS##* }"
+
+for VERSION in ${SERVER_VERSIONS}
+do
+  start_server "${VERSION}"
+
+  check "a backup of MySQL ${VERSION} restores its table, procedure and trigger" with_log backup_restores_on_the_server
+
+  case "${VERSION}" in
+    "${OLDEST_VERSION}")
+      check "DATABASE_TLS=required against MySQL ${VERSION}, which has no TLS, fails clearly and uploads nothing" with_log required_tls_against_a_server_without_tls_fails_clearly
+      ;;
+    *)
+      check "DATABASE_TLS=required works against MySQL ${VERSION}, which generates its own certificate" with_log required_tls_works_against_a_server_that_generates_a_certificate
+      ;;
+  esac
+
+  if [ "${VERSION}" = "${NATIVE_PASSWORD_VERSION}" ]
+  then
+    check "a mysql_native_password account fails against MySQL ${VERSION} with a clear error and uploads nothing" with_log native_password_account_fails_clearly
+  fi
+
+  [ "${VERSION}" = "${LAST_VERSION}" ] || stop_server
+done
+
+# The server that is left running is the newest, so the checks below all run against it.
+[ "${LAST_VERSION}" = "${NEWEST_VERSION}" ] || { echo "the last server must be the newest" >&2; exit 1; }
+
+check "an unchanged database is not uploaded again" with_log unchanged_database_is_not_uploaded_again
+check "a changed database is uploaded again" with_log changed_database_is_uploaded_again
+check "a failing dump uploads nothing and leaves nothing staged" with_log failing_dump_uploads_nothing
+check "a password with shell characters works and appears in no process arguments" with_log password_with_shell_characters_works_and_stays_out_of_arguments
+check "DATABASE_PASSWORD_FILE works" with_log password_file_works
+check "a DATABASE_PASSWORD_FILE with a Windows line ending works" with_log password_file_with_windows_line_ending_works
+check "rclone's environment holds no password and no MYSQL_PWD, whichever way the password is given" with_log rclone_environment_holds_no_connection_secret
+check "setting both password forms is refused" with_log both_password_forms_are_refused
+check "an unreadable DATABASE_PASSWORD_FILE is refused" with_log unreadable_password_file_is_refused
+check "a missing password is refused" with_log missing_password_is_refused
+check "a database name containing '/' or starting with '.' or '-' is refused at start" with_log unsafe_database_names_are_refused
+check "an unreachable host fails within 60 s and uploads nothing" with_log unreachable_host_fails_within_a_minute
+check "MYSQL_ variables from the server's own env file are ignored" with_log shared_server_variables_are_ignored
+check "DATABASE_TLS=required and verify work against a server with TLS, and verify rejects an unknown CA" with_log tls_required_and_verify_work_against_a_server_with_tls
+check "a dump larger than the staging space fails, uploads nothing and leaves no staged file" with_log dump_larger_than_the_staging_space_fails_cleanly
+check "--check accepts valid settings without connecting or printing" with_log check_accepts_valid_settings_silently
+check "--check rejects an unknown DATABASE_TLS value and a CA path without verify" with_log check_rejects_bad_tls_settings
+check "--check rejects a DATABASE_TLS_CA_PATH that isn't a readable file" with_log check_rejects_a_missing_ca_file
+check "--check rejects a DATABASE_PORT that isn't a positive integer" with_log check_rejects_a_bad_port
+check "an unknown DATABASE_ setting is refused" with_log an_unknown_database_setting_is_refused
+check "without the routine privilege the dump silently omits routines" with_log routines_need_the_routine_privilege
+check "an error line from mysqldump fails the run even when it exits 0" with_log error_line_from_a_tool_that_exits_zero_fails_the_run
+check "fail_on_error_lines fails on an error line and passes a warning" with_log fail_on_error_lines_stops_on_an_error_line_only
