@@ -2,21 +2,25 @@
 
 Hardened, shell-only images that back up a PostgreSQL, MariaDB or MySQL database, a SQLite database or a directory of files to any rclone remote on a cron schedule. Each image runs as a non-root user on a read-only root filesystem, and reports to a heartbeat monitor if you give it one.
 
-| Image | Backs up |
-|---|---|
-| `ghcr.io/nialtoservices/rclone-backup/postgres` | A PostgreSQL database |
-| `ghcr.io/nialtoservices/rclone-backup/mariadb` | A MariaDB database |
-| `ghcr.io/nialtoservices/rclone-backup/mysql` | A MySQL database |
-| `ghcr.io/nialtoservices/rclone-backup/sqlite` | A SQLite database |
-| `ghcr.io/nialtoservices/rclone-backup/files` | A directory of files |
+Each image is `ghcr.io/nialtoservices/rclone-backup/<image>`, and does one thing:
 
-Every run writes its backup to the target under a fixed name, replacing the object from the run before (`app.dump`, `app.sql.zst` or `app.db.zst` for a database), except `files`, which mirrors the source. The images keep no history of their own.
+| Image | Backs up | Writes to the target |
+|---|---|---|
+| [`files`](#files) | One directory, or one rclone remote path, with `rclone sync` | A mirror of the source |
+| [`sqlite`](#sqlite) | One SQLite database file, snapshotted while the application runs | `<file name>.zst` |
+| [`postgres`](#postgresql) | One PostgreSQL database, servers 15 to 18 | `<database>.dump` |
+| [`mariadb`](#mariadb) | One MariaDB database, servers 10.11, 11.4, 11.8 and later | `<database>.sql.zst` |
+| [`mysql`](#mysql) | One MySQL database, servers 8.0, 8.4 and 9.x | `<database>.sql.zst` |
+
+Every run writes its backup to the target under that fixed name, replacing the object from the run before, except `files`, which mirrors the source. The images keep no history of their own; to back up more than one database, file or folder, run more than one container.
 
 > **Point the target at a bucket with versioning enabled.** The bucket's versions are the backup history, and without them a run that replaces an object destroys the previous backup, and a `files` run that mirrors a deletion destroys the file. The images can't check this: any rclone remote is accepted, and only some backends can report whether versioning is on.
 >
 > **Check the bucket's lifecycle rules as well.** Rules such as Backblaze B2's "keep only the last version" make old versions vanish within a day, which leaves you with a single copy that the next bad run overwrites.
 
-## The hardening baseline
+## Usage
+
+### The hardening baseline
 
 Every example in this README runs under the same settings, and so does every test. Start from them and loosen one only for a reason:
 
@@ -42,13 +46,7 @@ services:
 
 The images also work without any of this, but there is no reason to run them that way.
 
-## Images and tags
-
-Every image is published for `linux/amd64` and `linux/arm64`. Each release is tagged with its full version (`1.2.3`), its minor series (`1.2`), its major series (`1`) and `latest`. `latest` always points at the newest release overall, while `1.2` and `1` point at the newest release in their own minor or major series. A new release moves each floating tag that it is the newest for.
-
-The newest release is rebuilt every week to pick up updated Debian packages and database client packages (PostgreSQL's from its own package repository, MariaDB's and SQLite's from Debian), and its tags are moved to the new build. The MySQL client is copied from a pinned `mysql` image instead, so it changes only when that pin does. Pin a major version to receive these rebuilds without breaking changes. Older releases are not rebuilt, so a major series stops receiving updates once the next one is released.
-
-## Configuring rclone
+### Configuring rclone
 
 `BACKUP_TARGET` (and `BACKUP_SOURCE` for `files`) names an rclone remote and a path, such as `b2:my-bucket/app`, or an absolute path inside the container. Any rclone flag can be set through the environment by upper-casing its name, replacing hyphens with underscores and adding the `RCLONE_` prefix: `--max-delete 100` becomes `RCLONE_MAX_DELETE=100`.
 
@@ -68,7 +66,7 @@ Define the remote itself in one of two ways, and prefer either to a connection s
 
 A key restricted to a single bucket can't create buckets, and rclone's check that the bucket exists can fail with a permissions error. For an S3 remote, set `RCLONE_S3_NO_CHECK_BUCKET=true` to skip it; the bucket must then already exist. Google Cloud Storage has `RCLONE_GCS_NO_CHECK_BUCKET` and Azure Blob `RCLONE_AZUREBLOB_NO_CHECK_CONTAINER`. The B2 backend has no such option, so the B2 examples here set nothing.
 
-## Settings every image shares
+### Settings every image shares
 
 | Variable | Description |
 |---|---|
@@ -84,7 +82,7 @@ Each image adds its own settings, listed in its section. `BACKUP_TARGET`, like `
 - **The container checks its settings when it starts.** A bad schedule, a missing or malformed required setting, or any variable beginning `BACKUP_`, `MONITOR_`, `DATABASE_` or `SQLITE_` that the image doesn't read (a typo, or a setting that belongs to another image) stops the container with a message naming it, rather than failing at the first run. Variables with any other name are ignored.
 - **One run at a time.** A scheduled run that comes due while the previous one is still going is skipped: the scheduler logs `not starting: job is still running` and starts nothing, so the monitor hears nothing from that tick. A run started by hand while another is going is refused with an error, and reported to the monitor as a failure if it was started through `/usr/local/bin/monitor`, as scheduled runs are.
 
-## Monitoring
+### Monitoring
 
 Each scheduled run can report to a heartbeat monitor (sometimes called a dead man's switch). Because the monitor expects to hear from every run, it alerts you when a backup fails and also when one doesn't happen at all: the container is down, the schedule never fires, or a run hangs.
 
@@ -106,11 +104,11 @@ Each request times out after 10 seconds and is retried up to 5 times, including 
 - StatusCake push checks have no failure signal either. StatusCake alerts when the success ping is overdue.
 - Healthchecks keeps the failure log in the check's event history. Uptime Kuma and StatusCake ignore the request body, so the details are in the container's log.
 
-## Stopping the container
+### Stopping the container
 
 Stopping the container interrupts a running backup: the dump tool or rclone cleans up its partial files, the run is reported to the monitor as failed, and the container exits with 143. If the monitor can't be reached, reporting can take up to about 90 seconds, while Docker kills a container 10 seconds after asking it to stop. To give the report time to get through, set a longer grace period, such as `stop_grace_period: 2m` in Compose or `docker stop -t 120`.
 
-## Fetching a backup from the target
+### Fetching a backup from the target
 
 Every restore starts by downloading the object, which needs nothing from these images. With rclone on your own machine and the remote defined as above:
 
@@ -274,7 +272,7 @@ The `postgres` image dumps one PostgreSQL database with `pg_dump --format=custom
 | `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
 | `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the [baseline](#the-hardening-baseline), so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves no staged file behind; a volume here avoids that. The staged file is deleted after every run |
 
-Passwords with any characters work, and the password reaches `pg_dump` through its environment, never its arguments. Neither it nor any other connection detail is passed on to rclone.
+Passwords with any characters work, and the password reaches `pg_dump` through its environment, never its arguments. Neither it nor any other connection detail is passed on to rclone. The official `postgres` image's own variables (`POSTGRES_PASSWORD`, `POSTGRES_USER`, `POSTGRES_DB` and the rest) are ignored, so an env file shared with the database container can't change which role or database is backed up.
 
 - **Versioning is the history.** Each upload replaces the object at the target, so keep older dumps by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
 - **Every run adds a version.** A custom-format archive records when it was created, so two dumps of an unchanged database differ and the checksum comparison never finds a match.
@@ -509,63 +507,70 @@ mysql --user root --execute 'CREATE DATABASE restored'
 zstd -dc app.sql.zst | mysql --user root restored
 ```
 
-## Maintenance
+## Images and tags
 
-### Releases
+Every image is published for `linux/amd64` and `linux/arm64`, and each release is tagged four ways:
 
-Release Drafter keeps a draft GitHub release up to date as pull requests merge into `main`. It works out the next version from each pull request's label: `major`, `minor` or `patch`, with an unlabelled pull request counting as a patch. Label your own pull requests before you merge them. A pull request labelled `ci` changes only the build and tests, so it is left out of the draft. Publishing the draft by hand builds, tests and pushes all five images.
+| Tag | Points at |
+|---|---|
+| `1.2.3` | That release |
+| `1.2` | The newest release in the `1.2` series |
+| `1` | The newest release in the `1` series |
+| `latest` | The newest release overall, whatever its major version |
 
-Routine patches publish themselves. When CI passes on `main`, the Auto release workflow lists everything merged since the newest published release, and publishes the draft only if every change is a Renovate pull request labelled `patch` or `ci`, with at least one `patch`. A change by anyone else, a direct push to `main`, or a `minor` or `major` Renovate update makes it wait, so nothing unreleased ever ships under a patch number; publish the draft yourself when you are ready. The workflow never publishes the first release, because there is nothing to compare against.
+A new release moves each floating tag that it is the newest for. The [weekly rebuild](#the-weekly-rebuild) also moves every tag of the newest release, its full version included, to the rebuilt image.
 
-A release published with a workflow's own token starts no other workflows, so Auto release starts the Publish workflow itself. If that step fails, the release exists but its images do not; start the build with `gh workflow run publish.yml --ref v1.2.3`, or leave it for the weekly rebuild.
+- **Pin the major version (`1`)** for anything that runs unattended. It receives every patch and minor release and every weekly rebuild, and nothing that would break a deployment, because that only comes in a new major.
+- **Avoid `latest`** in a deployment you don't watch. It moves to a new major as soon as one is released, and a new major can rename a setting or stop supporting your server's version.
+- **Pin a digest** (`ghcr.io/nialtoservices/rclone-backup/postgres@sha256:…`) only if the image must never change underneath you. Even a full version tag is replaced by the weekly rebuild, and a digest receives no fixes at all until you move it.
 
-Publish runs one at a time. A run that is waiting behind another is cancelled if a third arrives, because GitHub keeps only one run pending, so two releases published close together can leave the earlier one without images. A release in that state shows as a cancelled Publish run in the Actions tab. Start its build again with `gh workflow run publish.yml --ref v1.2.3`, naming the release's tag.
+## Release lifecycle
 
-### Renovate
+Releases are numbered by what they mean for a running deployment:
 
-Renovate tracks the Debian and `mysql:9.7` digests, the rclone and supercronic versions (through the `# renovate:` comments in the Dockerfile), the GitHub Actions pins, the two images pinned inside `build.yml`, and the digests in `test/servers`. It labels each pull request by update type, and `ci` instead for anything that only changes CI.
-
-- **Patch and digest updates** merge themselves once CI passes and the release is three days old, except supercronic.
-- **Minor updates** wait for you to review and merge them.
-- **Major updates** wait on the Dependency Dashboard until you approve them. A new PostgreSQL, MariaDB or MySQL series needs its own line in `test/servers` and its own tests, so an approved major for a test server is a prompt to add that line by hand, not a change to merge.
-- **The next Debian release is yours to start.** The base image is `debian:trixie-slim`, and Renovate only moves its digest within trixie, so it will not offer the next Debian as an update. When a new Debian release arrives, change the tag of the `debian` stage at the top of the Dockerfile and the `trixie-pgdg` repository name in the `postgres` stage, and check that the PGDG, MariaDB and MySQL client packages exist for it.
-
-#### supercronic
-
-supercronic publishes no checksum file or signature, so each architecture's SHA-256 in the Dockerfile is edited by hand. Renovate changes only `SUPERCRONIC_VERSION`, so its pull request fails the build at the checksum until you update both checksums, which is the intended stop. On the Renovate branch:
-
-1. Download `supercronic-linux-amd64` and `supercronic-linux-arm64` for the new version.
-2. Check each `sha1sum` against the SHA-1 in the release notes.
-3. Put each `sha256sum` in `SUPERCRONIC_SHA256_AMD64` and `SUPERCRONIC_SHA256_ARM64`, and push.
-
-Renovate leaves a branch alone once you have pushed to it. Merge the pull request when CI passes; it publishes as a patch release like any other Renovate patch.
-
-#### Every November
-
-PostgreSQL's oldest major reaches end of life each November, and PGDG then moves its client to an archive repository, so installing it fails. Until that is dealt with, the weekly rebuild fails without pushing anything, and the images already published keep working. Two changes follow, and each is its own release:
-
-1. When the new major arrives, add its `postgresql-client-N` package to the Dockerfile, add its server to `test/servers` and the version settings at the top of `test/postgres`, and list it in this README. Merge that as a minor release and publish the draft: servers keep working, and one more is supported.
-2. When the oldest major ends, drop its `postgresql-client-N` package and remove it from the supported versions in `test/postgres` and this README. Its line stays in `test/servers`, because the newest unsupported major is the server the refusal test uses, so set `UNSUPPORTED_VERSION` in `test/postgres` to it. Merge that as a major release and publish the draft, because the images stop backing up servers they used to.
-
-MariaDB and MySQL each use a single client, so their end-of-life dates do not affect the build.
+- **Patch releases** carry routine dependency fixes, such as a new rclone patch version or a refreshed Debian or MySQL base image. They ship automatically: once an update has passed every image's tests on both platforms, it is merged and released without waiting for anyone.
+- **Minor releases** add without taking anything away, such as support for a new PostgreSQL major or a new rclone minor version.
+- **Major releases** carry anything that would break a deployment: a renamed or removed setting, a server version that is no longer supported, or a client that no longer works with a server it used to. Such a change never lands in a patch or minor release.
 
 ### The weekly rebuild
 
-GitHub disables the weekly rebuild after 60 days without repository activity. To be alerted when that happens, or when a rebuild fails, set the `REBUILD_MONITOR_URL` repository secret to a heartbeat monitor's success URL with a weekly period. Re-enable a disabled schedule with `gh workflow enable publish.yml`.
+The newest release is rebuilt, tested and pushed again every week, so it picks up Debian's fixes and new database client packages (PostgreSQL's from its own package repository, MariaDB's and SQLite's from Debian) without waiting for a release. The MySQL client is copied from a pinned `mysql` image instead, so it changes only when that pin does, which is itself a patch release.
 
-### Setting up the repository
+Only the newest release is rebuilt. An older series stops receiving updates once a newer release exists, so a pinned major keeps receiving them only until the next major comes out.
 
-1. Create the repository on GitHub and push.
-2. Create the labels `major`, `minor`, `patch` and `ci`.
-3. Install the Renovate GitHub app on the repository.
-4. Protect `main` with branch protection, and require the one check named `CI passed` (the `ci-ok` job in `ci.yml`), so that Renovate merges nothing that has not passed CI. It fails unless the lint and every image build and test succeeded, and it fails when they are skipped or cancelled, so you never need to list the individual jobs, whose names change with the images and platforms. Also enable "Allow auto-merge" in the repository settings: Renovate then asks GitHub to merge each automerge pull request as soon as the checks pass. Without it, Renovate skips that request and merges the pull request itself on a later run, so the setting is a speed-up and not a requirement.
-5. Optionally add the `REBUILD_MONITOR_URL` secret.
-6. Publish the first release yourself, from the draft Release Drafter creates on the first push to `main`.
-7. After that first publish, make each of the five packages public: packages a workflow creates with `GITHUB_TOKEN` start private, so nobody can pull the images until you open the package's page on GitHub, then Package settings, then Change visibility, and choose Public. Do it for `files`, `sqlite`, `postgres`, `mariadb` and `mysql`.
+### PostgreSQL versions
 
-### Tests
+PostgreSQL is the one family whose supported versions change every year, because the `postgres` image carries a client for each supported server major:
 
-Before anything is published, CI lints the scripts with shellcheck and the workflows with actionlint, then builds every image and runs its tests on each platform. The suites need only Docker. Each takes the image to test, and the database suites pull the server images listed in `test/servers`:
+- **A new major is added in a minor release**, around September or October, once PostgreSQL has released it and its client packages are available.
+- **The end-of-life major is dropped in a major release** in November, when PostgreSQL's support for it ends and its client packages are withdrawn from the repository the image installs them from.
+
+So **stay on your image's current major until your server is upgraded**. The next major refuses a server it no longer supports, with a message naming the version, and nothing is uploaded. The major you stay on is no longer rebuilt, just as your server no longer receives fixes.
+
+### MySQL and MariaDB clients
+
+Each of these images carries a single client, so their servers' end-of-life dates don't change the build.
+
+- **MySQL**: Oracle's client from the newest LTS release (9.7 today), which dumps every supported server. It moves only to the next LTS, never to an innovation release.
+- **MariaDB**: Debian's client (MariaDB 11.8 on Debian 13), updated by the weekly rebuild. It moves to a new MariaDB series only with a new Debian release.
+
+## Development
+
+### How the images are built
+
+One [Dockerfile](Dockerfile) builds all five images: a shared base stage, and one target per image (`docker build --target postgres .`). The base is Debian 13 (`debian:trixie-slim`, pinned by digest, with every package upgraded at build time), with tini as the init process, supercronic as the scheduler, rclone, and the shell scripts in `bin/`, `lib/` and `jobs/`.
+
+- **rclone** is the official release zip, verified against the release's `SHA256SUMS`, whose PGP signature is checked against rclone's signing key in [`keys/`](keys).
+- **supercronic** is its release binary, pinned by version and by each architecture's SHA-256.
+- **Each image adds only its own client**: PostgreSQL's from its own signed package repository, MariaDB's and `sqlite3` from Debian, and Oracle's `mysql` and `mysqldump` copied from a pinned `mysql` image. The PostgreSQL, MariaDB and MySQL client tools are each run once during the build, so one with a missing library fails the build instead of the first backup.
+
+Published images carry an SBOM and build provenance.
+
+### Running the tests
+
+CI lints the scripts with shellcheck and the workflows with actionlint, then builds every image on native runners for both platforms and runs its tests, on every pull request and every push to `main`. A release is built and tested the same way before anything is pushed.
+
+The suites need only Docker. Each takes the image to test, and the database suites pull the server images listed in `test/servers`:
 
 ```sh
 docker build --target files --tag rclone-backup/files:test .
@@ -579,6 +584,15 @@ test/base rclone-backup/files:test
 ```sh
 test/github-scripts
 ```
+
+### Keeping dependencies current
+
+[Renovate](https://docs.renovatebot.com) tracks every pinned dependency: the Debian and `mysql` base images, rclone and supercronic, the GitHub Actions and the linters CI runs, and the database servers the tests run against. It labels each pull request with its update type.
+
+- **Patch and digest updates** are merged automatically once CI passes, at least three days after the upstream release so that a bad one can be withdrawn first. supercronic's are the exception, because its checksums are checked by hand. When everything merged since the last release is such an update, it is published as a patch release straight away.
+- **Minor updates** wait for review, and **new majors** wait for approval on Renovate's Dependency Dashboard.
+
+[Release Drafter](https://github.com/release-drafter/release-drafter) keeps a draft of the next release, its version worked out from the labels of the pull requests merged since the last one. Anything other than a routine update waits in that draft until it is published by hand.
 
 ## Licences
 
