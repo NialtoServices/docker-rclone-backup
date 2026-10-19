@@ -519,13 +519,16 @@ Routine patches publish themselves. When CI passes on `main`, the Auto release w
 
 A release published with a workflow's own token starts no other workflows, so Auto release starts the Publish workflow itself. If that step fails, the release exists but its images do not; start the build with `gh workflow run publish.yml --ref v1.2.3`, or leave it for the weekly rebuild.
 
+Publish runs one at a time. A run that is waiting behind another is cancelled if a third arrives, because GitHub keeps only one run pending, so two releases published close together can leave the earlier one without images. A release in that state shows as a cancelled Publish run in the Actions tab. Start its build again with `gh workflow run publish.yml --ref v1.2.3`, naming the release's tag.
+
 ### Renovate
 
 Renovate tracks the Debian and `mysql:9.7` digests, the rclone and supercronic versions (through the `# renovate:` comments in the Dockerfile), the GitHub Actions pins, the two images pinned inside `build.yml`, and the digests in `test/servers`. It labels each pull request by update type, and `ci` instead for anything that only changes CI.
 
-- **Patch and digest updates** merge themselves once CI passes, except supercronic.
+- **Patch and digest updates** merge themselves once CI passes and the release is three days old, except supercronic.
 - **Minor updates** wait for you to review and merge them.
 - **Major updates** wait on the Dependency Dashboard until you approve them. A new PostgreSQL, MariaDB or MySQL series needs its own line in `test/servers` and its own tests, so an approved major for a test server is a prompt to add that line by hand, not a change to merge.
+- **The next Debian release is yours to start.** The base image is `debian:trixie-slim`, and Renovate only moves its digest within trixie, so it will not offer the next Debian as an update. When a new Debian release arrives, change the tag of the `debian` stage at the top of the Dockerfile and the `trixie-pgdg` repository name in the `postgres` stage, and check that the PGDG, MariaDB and MySQL client packages exist for it.
 
 #### supercronic
 
@@ -558,6 +561,7 @@ GitHub disables the weekly rebuild after 60 days without repository activity. To
 4. Protect `main` with branch protection, and require the one check named `CI passed` (the `ci-ok` job in `ci.yml`), so that Renovate merges nothing that has not passed CI. It fails unless the lint and every image build and test succeeded, and it fails when they are skipped or cancelled, so you never need to list the individual jobs, whose names change with the images and platforms. Also enable "Allow auto-merge" in the repository settings: Renovate then asks GitHub to merge each automerge pull request as soon as the checks pass. Without it, Renovate skips that request and merges the pull request itself on a later run, so the setting is a speed-up and not a requirement.
 5. Optionally add the `REBUILD_MONITOR_URL` secret.
 6. Publish the first release yourself, from the draft Release Drafter creates on the first push to `main`.
+7. After that first publish, make each of the five packages public: packages a workflow creates with `GITHUB_TOKEN` start private, so nobody can pull the images until you open the package's page on GitHub, then Package settings, then Change visibility, and choose Public. Do it for `files`, `sqlite`, `postgres`, `mariadb` and `mysql`.
 
 ### Tests
 
