@@ -85,7 +85,9 @@ DUMP_STDERR_PATH="${STAGING_DIRECTORY}/dump.stderr"
 
 # The dump is staged and checked before it is uploaded, never streamed into rclone, which would
 # store a truncated dump as the newest version if the tool died part-way. --dump-history keeps the
-# rows of system-versioned tables' history, which a dump drops without it.
+# rows of system-versioned tables' history, which a dump drops without it. --skip-dump-date and
+# zstd's deterministic output make the dump of an unchanged database byte-identical to the last one,
+# so the checksum comparison skips the upload and the bucket gains no version.
 info "dumping ${DATABASE_NAME} from ${DATABASE_HOST}:${SERVER_PORT}"
 DUMP_FAILED=false
 run_client_tool mariadb-dump --single-transaction --quick --routines --events --triggers --no-tablespaces \

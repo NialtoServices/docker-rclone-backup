@@ -86,6 +86,9 @@ DUMP_STDERR_PATH="${STAGING_DIRECTORY}/dump.stderr"
 # store a truncated dump as the newest version if the tool died part-way. --set-gtid-purged=OFF keeps
 # the server's replication state out of a dump that restores into a different database, and
 # --skip-masking-policies leaves out the 9.x masking policies a community server can't dump.
+# --skip-dump-date and zstd's deterministic output make the dump of an unchanged database
+# byte-identical to the last one, so the checksum comparison skips the upload and the bucket gains no
+# version.
 info "dumping ${DATABASE_NAME} from ${DATABASE_HOST}:${SERVER_PORT}"
 DUMP_FAILED=false
 run_client_tool /opt/mysql/bin/mysqldump --single-transaction --quick --routines --events --triggers --no-tablespaces \

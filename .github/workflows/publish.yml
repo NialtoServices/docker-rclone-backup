@@ -129,7 +129,8 @@ jobs:
   # would let a monitor stay quiet about a single image that failed to merge.
   #
   # GitHub disables a scheduled workflow after 60 days without repository activity, and a run that
-  # never starts can't report a failure. A heartbeat monitor alerts when this ping stops.
+  # never starts can't report a failure. Renovate's merges are what normally count as that activity,
+  # and a heartbeat monitor alerts when this ping stops.
   report:
     name: Report the rebuild
     if: github.event_name == 'schedule'

@@ -1,7 +1,9 @@
 name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
 
-# Renovate labels its pull requests by update type, and an unlabelled one counts as a patch.
+# The version comes from pull request labels, so commit subjects stay plain, with no Conventional
+# Commits prefix. Renovate labels its pull requests by update type, and an unlabelled one counts as a
+# patch.
 version-resolver:
   major:
     labels:

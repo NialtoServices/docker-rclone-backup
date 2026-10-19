@@ -65,6 +65,7 @@ INTEGRITY_RESULT="$(sqlite3 -readonly "${SNAPSHOT_PATH}" "PRAGMA integrity_check
 [ "${INTEGRITY_RESULT}" = "ok" ] \
   || fatal "the snapshot of ${SQLITE_DATABASE} failed its integrity check: ${INTEGRITY_RESULT}"
 
+# The bucket stores every version in full, and a SQLite file compresses well.
 zstd -q --rm "${SNAPSHOT_PATH}" || fatal "failed to compress the snapshot of ${SQLITE_DATABASE}"
 zstd -q --test "${SNAPSHOT_PATH}.zst" || fatal "the compressed snapshot of ${SQLITE_DATABASE} is corrupt"
 

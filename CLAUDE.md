@@ -23,6 +23,18 @@ file reads as ground truth and so misleads the moment it drifts.
 - **Features that need real logic belong in tidweard, not here.** Manifests, restore planning,
   verification by test restore and capability checking are tidweard's job. This project stays a
   thin layer of shell around the database clients and rclone.
+- **One database, SQLite file or folder per container, and no history of its own.** The bucket's
+  versioning is the history, so timestamped object names, pruning and discovering several databases
+  stay out; more sources mean more containers.
+- **Every object restores with stock tools, without these images.** `pg_restore`, `mysql` or
+  `mariadb`, `sqlite3`, `zstd` and rclone on any machine are enough; nothing may wrap, encrypt or
+  reformat a dump in a way only this project can undo.
+- **A failure must never look like a success.** A run that didn't happen, stopped part-way or
+  produced a dump that can't be read back fails the run and reaches the monitor.
+- **The `DATABASE_*` names deliberately differ from the official database images' variables**
+  (`POSTGRES_USER`, `MYSQL_PASSWORD`, `MARIADB_DATABASE`…). An env file shared with the database
+  container then can't make the backup connect as the application's or root's account, so never
+  read those names or fall back to them.
 - **Everything written at run time lives under `/tmp`.** The images run with a read-only root
   filesystem and `/tmp` as a `noexec` tmpfs, so the crontab, the lock, staging and rclone's cache
   all go there, unless the owner moves staging with `BACKUP_STAGING_PATH`.

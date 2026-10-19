@@ -95,6 +95,9 @@ case "${SERVER_VERSION_NUMBER}" in
   "" | *[!0-9]*) fatal "the server at ${DATABASE_HOST}:${SERVER_PORT} reported a version that can't be read: '${SERVER_VERSION_NUMBER}'" ;;
 esac
 
+# The dump is taken, and listed, by the tools of the server's own major and no other. pg_dump refuses
+# a server newer than itself, and a newer pg_dump can write an archive that the server's own
+# pg_restore can't read, so a server with no matching client is refused, a newer one included.
 SERVER_MAJOR=$((SERVER_VERSION_NUMBER / 10000))
 CLIENT_BIN_DIRECTORY="${POSTGRES_BIN_DIRECTORY}/${SERVER_MAJOR}/bin"
 

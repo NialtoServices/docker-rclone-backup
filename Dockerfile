@@ -14,14 +14,20 @@
 # limitations under the License.
 #
 
+# The base must be glibc-based, for the MySQL client copied from Oracle's image, and have PGDG
+# packages for every supported PostgreSQL major on one release. Debian has both.
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS debian
 
 # Oracle's MySQL clients come from the official image rather than Debian, which carries MariaDB's in
-# their place. The 9.7 LTS client dumps and restores every supported server, 8.0 to 9.x.
+# their place, and neither family's client stands in for the other's. The 9.7 LTS client dumps and
+# restores every supported server, 8.0 to 9.x. The client is always an LTS release and moves only to
+# the next LTS, because an innovation release stops receiving fixes once the next one arrives.
 FROM mysql:9.7@sha256:c7cb87a9822f499375287930cbff71d6d3b201e346b45108b1115b435ee2df13 AS mysql-oracle
 
-# The official release zip is verified against the PGP-signed SHA256SUMS, and that signature against
-# the signing key committed in keys/rclone.asc, so a version bump needs no checksum edits.
+# rclone must be verifiable back to its publisher's signing key, so it comes from the official release
+# zip; the rclone/rclone image carries no signature or provenance to check. The zip is verified against
+# the PGP-signed SHA256SUMS, and that signature against the signing key committed in keys/rclone.asc,
+# so a version bump needs no checksum edits.
 FROM debian AS rclone
 
 ARG TARGETARCH
@@ -71,6 +77,11 @@ RUN set -eu; \
 	gpg --batch --show-keys --with-colons /tmp/pgdg.asc | awk -F: '$1 == "pub" { primary = 1; next } $1 == "fpr" && primary { print $10; primary = 0 }' > /tmp/fingerprints; \
 	[ "$(cat /tmp/fingerprints)" = "${PGDG_SIGNER_FINGERPRINT}" ]
 
+# The scheduler runs jobs as the image's non-root user and passes them the container's environment,
+# which holds every setting. supercronic does both and logs to standard output; busybox crond runs
+# nothing as a non-root user, without an error, and Debian's cron needs root and clears the
+# environment.
+#
 # supercronic's releases publish no checksum file or signature, so each architecture's SHA-256 is
 # pinned here and a version bump is checked by hand against the SHA-1s in the release notes.
 FROM debian AS supercronic

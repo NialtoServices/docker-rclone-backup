@@ -92,9 +92,11 @@ require_database_port() {
   esac
 }
 
-# DATABASE_TLS defaults to disabled. A CA file only means something when the server's certificate is
-# verified, so naming one under another mode is a mistake worth stopping for, and naming one the
-# container can't read would otherwise fail every run with the client's own message.
+# DATABASE_TLS defaults to disabled, because these containers normally sit beside their database on a
+# private Docker network; a managed database, or one across an untrusted network, sets required or
+# verify. A CA file only means something when the server's certificate is verified, so naming one
+# under another mode is a mistake worth stopping for, and naming one the container can't read would
+# otherwise fail every run with the client's own message.
 require_database_tls() {
   DATABASE_TLS="${DATABASE_TLS:-disabled}"
 
