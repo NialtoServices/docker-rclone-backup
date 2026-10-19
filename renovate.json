@@ -44,7 +44,7 @@
   ],
   "packageRules": [
     {
-      "description": "Patch and digest updates change the image and publish themselves",
+      "description": "Patch and digest updates change the image and publish themselves, so each waits three days to let a bad release be pulled first; a datasource with no release timestamps is not held back",
       "matchUpdateTypes": [
         "patch",
         "digest",
@@ -54,7 +54,9 @@
       "labels": [
         "patch"
       ],
-      "automerge": true
+      "automerge": true,
+      "minimumReleaseAge": "3 days",
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
     },
     {
       "description": "A replacement is a different package, so it waits for review like a minor",
