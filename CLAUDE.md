@@ -29,3 +29,10 @@ file reads as ground truth and so misleads the moment it drifts.
 - **Patches publish themselves only when every change since the last release is a patch.** If an
   unpublished minor or major change is waiting, a patch joins that release instead of shipping
   under a patch number. See the CI section of the design spec in `docs/superpowers/specs/`.
+- **`renovate.json` keeps `ci` pull requests free of the `patch` label.** The update-type rules set
+  `labels` and the later CI rule replaces it; changing either to `addLabels` would give an Actions
+  or test-server patch `patch,ci`, which the auto-release decision publishes. A pull request that
+  changes both the Dockerfile and `test/servers` (the `mysql:9.7` digest) carries both labels on
+  purpose, because it does change an image.
+- **`config:recommended` ignores `test/`**, so `renovate.json` removes `:ignoreModulesAndTests`;
+  without that `test/servers` is never read and Renovate reports nothing wrong.

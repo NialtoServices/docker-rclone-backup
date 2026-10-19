@@ -1,0 +1,25 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+# Renovate labels its pull requests by update type, and an unlabelled one counts as a patch.
+version-resolver:
+  major:
+    labels:
+      - major
+  minor:
+    labels:
+      - minor
+  patch:
+    labels:
+      - patch
+  default: patch
+
+# A change that only touches CI never reaches an image, so it neither appears in the notes nor
+# raises the version.
+exclude-labels:
+  - ci
+
+template: |
+  ## Changes
+
+  $CHANGES

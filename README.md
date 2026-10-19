@@ -408,7 +408,56 @@ zstd -dc app.sql.zst | mysql --user root restored
 
 ## Maintenance
 
+### Releases
+
+Release Drafter keeps a draft GitHub release up to date as pull requests merge into `main`. It works out the next version from each pull request's label: `major`, `minor` or `patch`, with an unlabelled pull request counting as a patch. Label your own pull requests before you merge them. A pull request labelled `ci` changes only the build and tests, so it is left out of the draft. Publishing the draft by hand builds, tests and pushes all five images.
+
+Routine patches publish themselves. When CI passes on `main`, the Auto release workflow lists everything merged since the newest published release, and publishes the draft only if every change is a Renovate pull request labelled `patch` or `ci`, with at least one `patch`. A change by anyone else, a direct push to `main`, or a `minor` or `major` Renovate update makes it wait, so nothing unreleased ever ships under a patch number; publish the draft yourself when you are ready. The workflow never publishes the first release, because there is nothing to compare against.
+
+A release published with a workflow's own token starts no other workflows, so Auto release starts the Publish workflow itself. If that step fails, the release exists but its images do not; start the build with `gh workflow run publish.yml --ref v1.2.3`, or leave it for the weekly rebuild.
+
+### Renovate
+
+Renovate tracks the Debian and `mysql:9.7` digests, the rclone and supercronic versions (through the `# renovate:` comments in the Dockerfile), the GitHub Actions pins, the two images pinned inside `build.yml`, and the digests in `test/servers`. It labels each pull request by update type, and `ci` instead for anything that only changes CI.
+
+- **Patch and digest updates** merge themselves once CI passes, except supercronic.
+- **Minor updates** wait for you to review and merge them.
+- **Major updates** wait on the Dependency Dashboard until you approve them. A new PostgreSQL, MariaDB or MySQL series needs its own line in `test/servers` and its own tests, so an approved major for a test server is a prompt to add that line by hand, not a change to merge.
+
+#### supercronic
+
+supercronic publishes no checksum file or signature, so each architecture's SHA-256 in the Dockerfile is edited by hand. Renovate changes only `SUPERCRONIC_VERSION`, so its pull request fails the build at the checksum until you update both checksums, which is the intended stop. On the Renovate branch:
+
+1. Download `supercronic-linux-amd64` and `supercronic-linux-arm64` for the new version.
+2. Check each `sha1sum` against the SHA-1 in the release notes.
+3. Put each `sha256sum` in `SUPERCRONIC_SHA256_AMD64` and `SUPERCRONIC_SHA256_ARM64`, and push.
+
+Renovate leaves a branch alone once you have pushed to it. Merge the pull request when CI passes; it publishes as a patch release like any other Renovate patch.
+
+#### Every November
+
+PostgreSQL's oldest major reaches end of life each November, and PGDG then moves its client to an archive repository, so installing it fails. Until that is dealt with, the weekly rebuild fails without pushing anything, and the images already published keep working. When the new major arrives, and again when the oldest ends:
+
+1. In the Dockerfile, add the new major's `postgresql-client-N` package and drop the end-of-life one.
+2. Update the version settings at the top of `test/postgres` and the matching lines in `test/servers`, where the newest unsupported major stays as the server the refusal test uses, and the supported versions in this README.
+3. Merge it as a minor release and publish the draft.
+
+MariaDB and MySQL each use a single client, so their end-of-life dates do not affect the build.
+
+### The weekly rebuild
+
 GitHub disables the weekly rebuild after 60 days without repository activity. To be alerted when that happens, or when a rebuild fails, set the `REBUILD_MONITOR_URL` repository secret to a heartbeat monitor's success URL with a weekly period. Re-enable a disabled schedule with `gh workflow enable publish.yml`.
+
+### Setting up the repository
+
+1. Create the repository on GitHub and push.
+2. Create the labels `major`, `minor`, `patch` and `ci`.
+3. Install the Renovate GitHub app on the repository.
+4. Protect `main` with branch protection, and require the `CI` checks, so that Renovate merges nothing that has not passed them.
+5. Optionally add the `REBUILD_MONITOR_URL` secret.
+6. Publish the first release yourself, from the draft Release Drafter creates on the first push to `main`.
+
+### Tests
 
 Before anything is published, CI lints the scripts with shellcheck and runs every image's tests on each platform. To run the tests for the workflow scripts locally:
 

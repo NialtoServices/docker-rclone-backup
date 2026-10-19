@@ -1,0 +1,60 @@
+#!/bin/sh
+#
+# Decides whether the changes merged since the last release may be published without the owner.
+# Reads one line per change on standard input:
+#
+#   <author> <comma-separated labels>
+#
+# A change that was pushed straight to main has no pull request and is written "direct -"; a pull
+# request with no labels has "-" for its labels. Prints "publish" only when every change is by
+# renovate[bot], every label is "patch" or "ci", and at least one change is labelled "patch";
+# otherwise prints "wait". A release is never published over an unreviewed or non-patch change, and
+# no input is nothing to publish.
+
+set -eu
+
+RENOVATE_AUTHOR="renovate[bot]"
+
+# Pull request labels are free text, so a "*" in one must not expand against the file system.
+set -f
+
+HAS_PATCH=false
+
+while read -r AUTHOR LABELS || [ -n "${AUTHOR}" ]
+do
+  # A line with no labels field is malformed rather than unlabelled.
+  if [ -z "${AUTHOR}" ] || [ -z "${LABELS}" ] || [ "${AUTHOR}" != "${RENOVATE_AUTHOR}" ]
+  then
+    echo wait
+    exit 0
+  fi
+
+  if [ "${LABELS}" = "-" ]
+  then
+    continue
+  fi
+
+  OLD_IFS="${IFS}"
+  IFS=,
+
+  for LABEL in ${LABELS}
+  do
+    case "${LABEL}" in
+      patch) HAS_PATCH=true ;;
+      ci) ;;
+      *)
+        echo wait
+        exit 0
+        ;;
+    esac
+  done
+
+  IFS="${OLD_IFS}"
+done
+
+if [ "${HAS_PATCH}" = true ]
+then
+  echo publish
+else
+  echo wait
+fi

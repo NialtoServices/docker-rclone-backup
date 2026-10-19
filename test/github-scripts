@@ -83,6 +83,18 @@ resolve_release_refuses() {
   [ "${STANDARD_ERROR}" = "::error::No release tag to build" ]
 }
 
+# Passes when auto-release-decision, given the changes in $2 on standard input, prints exactly $1.
+decides() {
+  ACTUAL="$(printf '%s' "$2" | run_script auto-release-decision)"
+
+  if [ "${ACTUAL}" != "$1" ]
+  then
+    echo "expected: $1" >&2
+    echo "actual: ${ACTUAL}" >&2
+    return 1
+  fi
+}
+
 schedule_picks_the_newest_release() {
   resolves_to branch main "v1.0.0
 v1.0.1
@@ -154,3 +166,42 @@ check "an older major's newest owns its major and minor tags" old_major_keeps_it
 check "v10.0.0 sorts after v9.0.0 and v1.10.0" versions_sort_numerically_not_alphabetically
 check "v1.9.0 is not the newest in v1 after v1.10.0" minor_versions_sort_numerically_within_a_major
 check "no release tag fails with an error" no_release_is_an_error
+
+check "Renovate patch updates publish" decides publish "renovate[bot] patch
+renovate[bot] patch
+"
+check "Renovate patch updates alongside CI-only updates publish" decides publish "renovate[bot] patch
+renovate[bot] ci
+renovate[bot] patch,ci
+"
+check "CI-only updates wait" decides wait "renovate[bot] ci
+renovate[bot] ci
+"
+check "a minor update among patches waits" decides wait "renovate[bot] patch
+renovate[bot] minor
+renovate[bot] patch
+"
+check "a major update among patches waits" decides wait "renovate[bot] patch
+renovate[bot] patch,major
+"
+check "a change by the owner among patches waits" decides wait "renovate[bot] patch
+tobyherbert patch
+"
+check "a direct push among patches waits" decides wait "renovate[bot] patch
+direct -
+"
+check "no changes wait" decides wait ""
+check "an unlabelled Renovate update does not publish on its own" decides wait "renovate[bot] -
+"
+check "an unlabelled Renovate update does not block a patch" decides publish "renovate[bot] -
+renovate[bot] patch
+"
+check "a line with no labels field waits" decides wait "renovate[bot] patch
+renovate[bot]
+"
+check "a last line without a newline is still read" decides wait "renovate[bot] patch
+direct -"
+check "a label is matched whole, not by prefix" decides wait "renovate[bot] patch,patched
+"
+check "a label glob is not expanded" decides wait "renovate[bot] patch,*
+"

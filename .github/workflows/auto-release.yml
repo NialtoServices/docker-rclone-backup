@@ -1,0 +1,119 @@
+name: Auto release
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+jobs:
+  release:
+    name: Publish routine patches
+    # A pull request from a fork can have a branch named main, so the triggering event matters as
+    # well as the branch.
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      # A workflow_run workflow runs from the default branch, so this is the decision script as
+      # merged, not as changed by the commit under test.
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Decide whether to publish
+        id: decide
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          write_decision() {
+            echo "decision=$1" >> "${GITHUB_OUTPUT}"
+            echo "last-tag=${LAST_TAG:-}" >> "${GITHUB_OUTPUT}"
+            echo "Decision: $1"
+          }
+
+          LAST_TAG="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty')"
+
+          # The owner publishes the first release by hand; there is nothing to compare against.
+          if [ -z "${LAST_TAG}" ]
+          then
+            echo "No published release yet."
+            write_decision wait
+            exit 0
+          fi
+
+          # A later push has its own CI run, which decides over everything merged by then. The
+          # draft already covers that push, so it must not be published as HEAD_SHA's release.
+          CURRENT_HEAD="$(gh api "repos/${GH_REPO}/commits/main" --jq .sha)"
+
+          if [ "${CURRENT_HEAD}" != "${HEAD_SHA}" ]
+          then
+            echo "main has moved on from ${HEAD_SHA}."
+            write_decision wait
+            exit 0
+          fi
+
+          # Each commit becomes one line per merged pull request that contains it, or "direct -"
+          # when it has none. A failed API call fails the step, which can never print "publish".
+          CHANGES="$(
+            gh api "repos/${GH_REPO}/compare/${LAST_TAG}...${HEAD_SHA}" --paginate --jq '.commits[].sha' \
+              | while read -r SHA
+                do
+                  gh api "repos/${GH_REPO}/commits/${SHA}/pulls" --jq '
+                    [.[] | select(.merged_at != null)]
+                    | if length == 0 then "direct -"
+                      else .[] | "\(.user.login) \(if (.labels | length) == 0 then "-" else ([.labels[].name] | join(",")) end)"
+                      end'
+                done
+          )"
+
+          echo "Changes since ${LAST_TAG}:"
+          echo "${CHANGES}"
+
+          DECISION="$(printf '%s' "${CHANGES}" | .github/scripts/auto-release-decision)"
+          write_decision "${DECISION}"
+      # Publishing with the workflow's own token fires no release event, so publish.yml is started
+      # directly; workflow_dispatch is the one trigger a GITHUB_TOKEN may start.
+      - name: Publish the draft release and build it
+        if: steps.decide.outputs.decision == 'publish'
+        shell: bash
+        env:
+          LAST_TAG: ${{ steps.decide.outputs.last-tag }}
+        run: |
+          set -euo pipefail
+
+          DRAFT_TAG="$(gh release list --limit 100 --json tagName,isDraft,createdAt --jq '[.[] | select(.isDraft)] | sort_by(.createdAt) | last | .tagName // empty')"
+
+          if [ -z "${DRAFT_TAG}" ]
+          then
+            echo "::error::There is no draft release to publish"
+            exit 1
+          fi
+
+          # A routine patch only ever raises the patch number; anything else means the draft
+          # holds changes this run did not look at.
+          if [ "${DRAFT_TAG%.*}" != "${LAST_TAG%.*}" ]
+          then
+            echo "::error::The draft ${DRAFT_TAG} is not a patch release after ${LAST_TAG}"
+            exit 1
+          fi
+
+          # The tag is created at HEAD_SHA, the commit whose tests passed.
+          gh release edit "${DRAFT_TAG}" --draft=false --target "${HEAD_SHA}"
+          gh workflow run publish.yml --ref "${DRAFT_TAG}"
