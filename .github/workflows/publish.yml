@@ -38,9 +38,19 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          gh api "repos/${GITHUB_REPOSITORY}/tags" --paginate --jq '.[].name' \
-            | .github/scripts/resolve-release >> "${GITHUB_OUTPUT}"
+          TAGS="$(gh api "repos/${GITHUB_REPOSITORY}/tags" --paginate --jq '.[].name')"
+
+          # Before the first release the weekly schedule has nothing to rebuild; an empty release
+          # output skips the build and everything after it.
+          if [ "${GITHUB_EVENT_NAME}" = schedule ] && ! grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "${TAGS}"
+          then
+            echo "::notice::No release yet, so there is nothing to rebuild"
+            exit 0
+          fi
+
+          printf '%s\n' "${TAGS}" | .github/scripts/resolve-release >> "${GITHUB_OUTPUT}"
   build:
+    if: needs.resolve.outputs.release != ''
     needs:
       - resolve
     permissions:
