@@ -1,0 +1,57 @@
+#!/bin/sh
+#
+# Works out which release a publish run builds and which floating tags it owns. Reads the
+# repository's tag names on standard input, one per line in any order, and takes the trigger from
+# the environment:
+#
+#   REF_TYPE   "tag" when the run was triggered by a tag, anything else for a branch
+#   REF_NAME   the tag or branch name
+#
+# Prints release=, newest=, newest-in-major= and newest-in-minor= lines, ready to append to
+# GITHUB_OUTPUT. Lines that aren't vX.Y.Z are ignored. Nothing is printed on failure.
+
+set -eu
+
+: "${REF_TYPE:?REF_TYPE is not set}"
+: "${REF_NAME:?REF_NAME is not set}"
+
+RELEASES="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)"
+
+# Scheduled runs, and runs dispatched from a branch, refresh the newest release rather than
+# publishing unreleased code.
+if [ "${REF_TYPE}" = "tag" ]
+then
+  RELEASE="${REF_NAME}"
+else
+  RELEASE="$(printf '%s\n' "${RELEASES}" | tail -n 1)"
+fi
+
+if [ -z "${RELEASE}" ]
+then
+  echo "::error::No release tag to build" >&2
+  exit 1
+fi
+
+RELEASE_MINOR="${RELEASE%.*}"
+RELEASE_MAJOR="${RELEASE_MINOR%.*}"
+
+# Prints whether RELEASE is the newest release whose name starts with the prefix in $1.
+is_newest_with_prefix() {
+  NEWEST_WITH_PREFIX="$(printf '%s\n' "${RELEASES}" | awk -v prefix="$1" 'index($0, prefix) == 1' | tail -n 1)"
+
+  if [ "${RELEASE}" = "${NEWEST_WITH_PREFIX}" ]
+  then
+    echo true
+  else
+    echo false
+  fi
+}
+
+NEWEST="$(is_newest_with_prefix v)"
+NEWEST_IN_MAJOR="$(is_newest_with_prefix "${RELEASE_MAJOR}.")"
+NEWEST_IN_MINOR="$(is_newest_with_prefix "${RELEASE_MINOR}.")"
+
+echo "release=${RELEASE}"
+echo "newest=${NEWEST}"
+echo "newest-in-major=${NEWEST_IN_MAJOR}"
+echo "newest-in-minor=${NEWEST_IN_MINOR}"

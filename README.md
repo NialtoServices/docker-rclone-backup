@@ -2,6 +2,20 @@
 
 Hardened, shell-only images that back up a PostgreSQL, MariaDB or MySQL database, a SQLite database or a directory of files to any rclone remote on a cron schedule. Each image runs as a non-root user on a read-only root filesystem, and reports to a heartbeat monitor if you give it one.
 
+## Images and tags
+
+| Image | Backs up |
+|---|---|
+| `ghcr.io/nialtoservices/rclone-backup/postgres` | A PostgreSQL database |
+| `ghcr.io/nialtoservices/rclone-backup/mariadb` | A MariaDB database |
+| `ghcr.io/nialtoservices/rclone-backup/mysql` | A MySQL database |
+| `ghcr.io/nialtoservices/rclone-backup/sqlite` | A SQLite database |
+| `ghcr.io/nialtoservices/rclone-backup/files` | A directory of files |
+
+Every image is published for `linux/amd64` and `linux/arm64`. Each release is tagged with its full version (`1.2.3`), and with its minor version (`1.2`), its major version (`1`) and `latest` while it is the newest release in that series.
+
+The newest release is rebuilt every week to pick up updated Debian and PostgreSQL packages, and its tags are moved to the new build. Pin a major version to receive these rebuilds without breaking changes. Older releases are not rebuilt, so a major version stops receiving updates once the next one is released.
+
 ## Settings every image shares
 
 | Variable | Description |
@@ -390,6 +404,16 @@ Download the object from the target, create an empty database and restore into i
 ```sh
 mysql --user root --execute 'CREATE DATABASE restored'
 zstd -dc app.sql.zst | mysql --user root restored
+```
+
+## Maintenance
+
+GitHub disables the weekly rebuild after 60 days without repository activity. To be alerted when that happens, or when a rebuild fails, set the `REBUILD_MONITOR_URL` repository secret to a heartbeat monitor's success URL with a weekly period. Re-enable a disabled schedule with `gh workflow enable publish.yml`.
+
+Before anything is published, CI lints the scripts with shellcheck and runs every image's tests on each platform. To run the tests for the workflow scripts locally:
+
+```sh
+test/github-scripts
 ```
 
 ## Licence

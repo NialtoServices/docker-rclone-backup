@@ -1,0 +1,156 @@
+#!/bin/sh
+#
+# Tests for the scripts in .github/scripts, run from anywhere:
+#
+#   test/github-scripts
+#
+# The scripts run on a Linux runner, and resolve-release depends on GNU sort -V, so on any other
+# host they run in the same Debian image the images are built from.
+
+set -eu
+
+if [ "$#" -ne 0 ]
+then
+  echo "usage: $0" >&2
+  exit 2
+fi
+
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPTS_DIR="$(cd "${TEST_DIR}/../.github/scripts" && pwd)"
+
+# shellcheck source=lib.sh
+. "${TEST_DIR}/lib.sh"
+
+LINUX_IMAGE="$(sed -n 's/^FROM \(debian:trixie-slim@sha256:[0-9a-f]*\) AS debian$/\1/p' "${TEST_DIR}/../Dockerfile")"
+
+if [ -z "${LINUX_IMAGE}" ]
+then
+  echo "could not find the Debian image in the Dockerfile" >&2
+  exit 1
+fi
+
+# Runs the script named in $1 with the rest of the environment as given, reading standard input.
+run_script() {
+  SCRIPT_NAME="$1"
+
+  if [ "$(uname -s)" = "Linux" ]
+  then
+    "${SCRIPTS_DIR}/${SCRIPT_NAME}"
+  else
+    docker run --rm --interactive --network none \
+      --env REF_TYPE --env REF_NAME \
+      --volume "${SCRIPTS_DIR}:/scripts:ro" "${LINUX_IMAGE}" "/scripts/${SCRIPT_NAME}"
+  fi
+}
+
+# Passes when resolve-release, given the trigger in $1 and $2 and the tags in $3, prints exactly the
+# lines in $4.
+resolves_to() {
+  export REF_TYPE="$1"
+  export REF_NAME="$2"
+
+  ACTUAL="$(printf '%s\n' "$3" | run_script resolve-release)"
+
+  if [ "${ACTUAL}" != "$4" ]
+  then
+    echo "expected:" >&2
+    echo "$4" >&2
+    echo "actual:" >&2
+    echo "${ACTUAL}" >&2
+    return 1
+  fi
+}
+
+# Passes when resolve-release, given the trigger in $1 and $2 and the tags in $3, prints nothing on
+# standard output and an error on standard error, and exits non-zero.
+resolve_release_refuses() {
+  export REF_TYPE="$1"
+  export REF_NAME="$2"
+
+  ERROR_FILE="$(mktemp)"
+  STANDARD_OUTPUT="$(printf '%s\n' "$3" | run_script resolve-release 2> "${ERROR_FILE}" || echo "exit=$?")"
+  STANDARD_ERROR="$(cat "${ERROR_FILE}")"
+  rm -f "${ERROR_FILE}"
+
+  case "${STANDARD_OUTPUT}" in
+    exit=[1-9]*) ;;
+    *)
+      echo "expected a non-zero exit with no output, got: ${STANDARD_OUTPUT}" >&2
+      return 1
+      ;;
+  esac
+
+  [ "${STANDARD_ERROR}" = "::error::No release tag to build" ]
+}
+
+schedule_picks_the_newest_release() {
+  resolves_to branch main "v1.0.0
+v1.0.1
+v1.1.0
+v0.9.0
+notes" "release=v1.1.0
+newest=true
+newest-in-major=true
+newest-in-minor=true"
+}
+
+tag_in_an_older_minor_is_not_the_newest_in_its_major() {
+  resolves_to tag v1.0.2 "v1.0.0
+v1.0.1
+v1.0.2
+v1.1.0" "release=v1.0.2
+newest=false
+newest-in-major=false
+newest-in-minor=true"
+}
+
+new_major_owns_every_floating_tag() {
+  resolves_to tag v2.0.0 "v1.0.0
+v1.1.0
+v2.0.0" "release=v2.0.0
+newest=true
+newest-in-major=true
+newest-in-minor=true"
+}
+
+old_major_keeps_its_own_floating_tags() {
+  resolves_to tag v1.1.0 "v1.0.0
+v1.1.0
+v2.0.0" "release=v1.1.0
+newest=false
+newest-in-major=true
+newest-in-minor=true"
+}
+
+versions_sort_numerically_not_alphabetically() {
+  resolves_to branch main "v1.0.0
+v9.0.0
+v10.0.0
+v1.10.0
+v1.9.0" "release=v10.0.0
+newest=true
+newest-in-major=true
+newest-in-minor=true"
+}
+
+minor_versions_sort_numerically_within_a_major() {
+  resolves_to tag v1.9.0 "v1.0.0
+v1.9.0
+v1.10.0
+v10.0.0" "release=v1.9.0
+newest=false
+newest-in-major=false
+newest-in-minor=true"
+}
+
+no_release_is_an_error() {
+  resolve_release_refuses branch main "notes"
+}
+
+check "a schedule builds the newest release" schedule_picks_the_newest_release
+check "a tag in an older minor owns only its minor tag" tag_in_an_older_minor_is_not_the_newest_in_its_major
+check "a new major owns every floating tag" new_major_owns_every_floating_tag
+check "an older major's newest owns its major and minor tags" old_major_keeps_its_own_floating_tags
+check "v10.0.0 sorts after v9.0.0 and v1.10.0" versions_sort_numerically_not_alphabetically
+check "v1.9.0 is not the newest in v1 after v1.10.0" minor_versions_sort_numerically_within_a_major
+check "no release tag fails with an error" no_release_is_an_error

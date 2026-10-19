@@ -1,0 +1,137 @@
+name: Publish
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.release.outputs.release }}
+      newest: ${{ steps.release.outputs.newest }}
+      newest-in-major: ${{ steps.release.outputs.newest-in-major }}
+      newest-in-minor: ${{ steps.release.outputs.newest-in-minor }}
+    steps:
+      # The script is read from the commit that triggered the run, which is the default branch for a
+      # scheduled run and the release's tag for a published one.
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Resolve the release to build
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/tags" --paginate --jq '.[].name' \
+            | .github/scripts/resolve-release >> "${GITHUB_OUTPUT}"
+  build:
+    needs:
+      - resolve
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.resolve.outputs.release }}
+      push: true
+  merge:
+    name: Merge ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    needs:
+      - resolve
+      - build
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - files
+          - sqlite
+          - postgres
+          - mariadb
+          - mysql
+    env:
+      REGISTRY_IMAGE: ghcr.io/nialtoservices/rclone-backup/${{ matrix.image }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-${{ matrix.image }}-*
+          merge-multiple: true
+      - name: Extract metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        id: meta
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.resolve.outputs.release }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.resolve.outputs.release }},enable=${{ needs.resolve.outputs.newest-in-minor }}
+            type=semver,pattern={{major}},value=${{ needs.resolve.outputs.release }},enable=${{ needs.resolve.outputs.newest-in-major }}
+            type=raw,value=latest,enable=${{ needs.resolve.outputs.newest }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Authenticate with the GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          mapfile -t TAG_OPTIONS < <(jq -r '.tags[] | "--tag=" + .' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+
+          SOURCES=()
+          for DIGEST in *
+          do
+            SOURCES+=("${REGISTRY_IMAGE}@sha256:${DIGEST}")
+          done
+
+          docker buildx imagetools create "${TAG_OPTIONS[@]}" "${SOURCES[@]}"
+      - name: Inspect manifest list
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          docker buildx imagetools inspect "${REGISTRY_IMAGE}:${VERSION}"
+
+  # This is a job of its own so that one ping follows all five images; a ping from each matrix leg
+  # would let a monitor stay quiet about a single image that failed to merge.
+  #
+  # GitHub disables a scheduled workflow after 60 days without repository activity, and a run that
+  # never starts can't report a failure. A heartbeat monitor alerts when this ping stops.
+  report:
+    name: Report the rebuild
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    needs:
+      - merge
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      REBUILD_MONITOR_URL: ${{ secrets.REBUILD_MONITOR_URL }}
+    steps:
+      - name: Report the scheduled rebuild to the monitor
+        if: env.REBUILD_MONITOR_URL != ''
+        run: |
+          curl --fail --silent --show-error --output /dev/null --max-time 10 --retry 5 "${REBUILD_MONITOR_URL}"

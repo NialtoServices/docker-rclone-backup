@@ -25,8 +25,7 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # test/servers is data, not a script, so the test scripts are named rather than globbed. With
-      # nullglob, .github/scripts/* adds nothing until that directory has files.
+      # test/servers is data, not a script, so the test scripts are named rather than globbed.
       - name: Lint shell scripts
         shell: bash
         run: |
@@ -35,7 +34,7 @@ jobs:
           SCRIPTS=(
             bin/* lib/* jobs/*
             test/lib.sh test/base test/shared
-            test/files test/sqlite test/postgres test/mariadb test/mysql
+            test/files test/sqlite test/postgres test/mariadb test/mysql test/github-scripts
             .github/scripts/*
           )
 
@@ -43,6 +42,10 @@ jobs:
           docker run --rm --volume "${PWD}:/mnt:ro" --workdir /mnt \
             koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
             "${SCRIPTS[@]}"
+
+      - name: Test the workflow scripts
+        run: |
+          test/github-scripts
 
       # The image runs shellcheck over each run: block as well, with the same pinned version.
       - name: Lint workflows
