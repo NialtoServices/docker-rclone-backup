@@ -1,0 +1,181 @@
+name: Build
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The git ref, tag or commit to check out
+        type: string
+        required: true
+      push:
+        description: Push each tested image to the registry by digest and upload the digests
+        type: boolean
+        default: false
+env:
+  REGISTRY_IMAGE_PREFIX: ghcr.io/nialtoservices/rclone-backup
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # test/servers is data, not a script, so the test scripts are named rather than globbed. With
+      # nullglob, .github/scripts/* adds nothing until that directory has files.
+      - name: Lint shell scripts
+        shell: bash
+        run: |
+          shopt -s nullglob
+
+          SCRIPTS=(
+            bin/* lib/* jobs/*
+            test/lib.sh test/base test/shared
+            test/files test/sqlite test/postgres test/mariadb test/mysql
+            .github/scripts/*
+          )
+
+          # The runner's own shellcheck predates the dialect that .shellcheckrc selects.
+          docker run --rm --volume "${PWD}:/mnt:ro" --workdir /mnt \
+            koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d \
+            "${SCRIPTS[@]}"
+
+      # The image runs shellcheck over each run: block as well, with the same pinned version.
+      - name: Lint workflows
+        run: |
+          docker run --rm --volume "${PWD}:/mnt:ro" --workdir /mnt \
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color
+  build:
+    name: Build ${{ matrix.image }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - lint
+    timeout-minutes: 60
+
+    # packages: write is granted by the calling workflow, only when it pushes. A called workflow
+    # can't raise its caller's permissions, so asking for it here would stop CI from starting.
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - files
+          - sqlite
+          - postgres
+          - mariadb
+          - mysql
+        platform:
+          - linux/amd64
+          - linux/arm64
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            slug: linux-amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: linux-arm64
+    env:
+      CACHE_SCOPE: ${{ matrix.image }}-${{ matrix.slug }}
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # The push below is served from this build's cache. Every input except the labels and
+      # attestations must stay identical to these, or the published image is not the one that was
+      # tested.
+      - name: Build for testing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          target: ${{ matrix.image }}
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: rclone-backup/${{ matrix.image }}:test
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,ignore-error=true,scope=${{ env.CACHE_SCOPE }}
+      - name: Run the image tests
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          "test/${IMAGE}" "rclone-backup/${IMAGE}:test"
+
+      # The files image is the base stage plus a job script, so it stands in for the base here.
+      - name: Run the shared behaviour tests
+        if: matrix.image == 'files'
+        run: |
+          test/shared rclone-backup/files:test
+      - name: Run the base image tests
+        if: matrix.image == 'files'
+        run: |
+          test/base rclone-backup/files:test
+      - name: Extract metadata
+        if: inputs.push
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        id: meta
+        with:
+          context: git
+          images: ${{ env.REGISTRY_IMAGE_PREFIX }}/${{ matrix.image }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ inputs.ref }}
+
+      # The action labels every image with the repository's description, which would replace the
+      # description the Dockerfile gives each image.
+      - name: Keep each image's own description
+        if: inputs.push
+        id: labels
+        env:
+          LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          DELIMITER="labels-${RANDOM}${RANDOM}${RANDOM}"
+
+          {
+            echo "labels<<${DELIMITER}"
+            grep -v '^org.opencontainers.image.description=' <<< "${LABELS}"
+            echo "${DELIMITER}"
+          } >> "${GITHUB_OUTPUT}"
+      - name: Authenticate with the GitHub Container Registry
+        if: inputs.push
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push by digest
+        if: inputs.push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        id: push
+        with:
+          context: .
+          target: ${{ matrix.image }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.labels.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          outputs: |
+            type=image,name=${{ env.REGISTRY_IMAGE_PREFIX }}/${{ matrix.image }},name-canonical=true,push=true,push-by-digest=true
+      - name: Prepare digest
+        if: inputs.push
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+      - name: Upload digest
+        if: inputs.push
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
