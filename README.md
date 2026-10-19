@@ -539,11 +539,10 @@ Renovate leaves a branch alone once you have pushed to it. Merge the pull reques
 
 #### Every November
 
-PostgreSQL's oldest major reaches end of life each November, and PGDG then moves its client to an archive repository, so installing it fails. Until that is dealt with, the weekly rebuild fails without pushing anything, and the images already published keep working. When the new major arrives, and again when the oldest ends:
+PostgreSQL's oldest major reaches end of life each November, and PGDG then moves its client to an archive repository, so installing it fails. Until that is dealt with, the weekly rebuild fails without pushing anything, and the images already published keep working. Two changes follow, and each is its own release:
 
-1. In the Dockerfile, add the new major's `postgresql-client-N` package and drop the end-of-life one.
-2. Update the version settings at the top of `test/postgres` and the matching lines in `test/servers`, where the newest unsupported major stays as the server the refusal test uses, and the supported versions in this README.
-3. Merge it as a minor release and publish the draft.
+1. When the new major arrives, add its `postgresql-client-N` package to the Dockerfile, add its server to `test/servers` and the version settings at the top of `test/postgres`, and list it in this README. Merge that as a minor release and publish the draft: servers keep working, and one more is supported.
+2. When the oldest major ends, drop its `postgresql-client-N` package and remove it from the supported versions in `test/postgres` and this README. Its line stays in `test/servers`, because the newest unsupported major is the server the refusal test uses, so set `UNSUPPORTED_VERSION` in `test/postgres` to it. Merge that as a major release and publish the draft, because the images stop backing up servers they used to.
 
 MariaDB and MySQL each use a single client, so their end-of-life dates do not affect the build.
 
