@@ -70,7 +70,8 @@ months. Propose each change before making it, and make it by the matching Mainte
 3. **Pending approvals.** For each major on the dashboard, read its release notes against what the
    workflows use and recommend taking it or not. `docker/metadata-action` and the artifact actions
    run only when publishing, so after merging one, prove it with
-   `gh workflow run publish.yml --ref <newest tag>`.
+   `gh workflow run publish.yml --ref main`: that runs `main`'s workflows to rebuild the newest
+   release, where a tag's ref would run the workflows as they were at that tag.
 4. **Database and platform versions.** Compare https://endoflife.date (`postgresql`, `mysql`,
    `mariadb`, `debian`) and each project's release notes with the Dockerfile, `test/servers` and the
    `SERVER_VERSIONS` at the top of `test/postgres`, `test/mysql` and `test/mariadb`:
