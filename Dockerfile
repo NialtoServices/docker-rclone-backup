@@ -123,3 +123,31 @@ USER 65532:65532
 CMD ["/usr/local/bin/start"]
 
 LABEL org.opencontainers.image.description="Scheduled snapshot of a SQLite database, checked and compressed, uploaded to a versioned bucket"
+
+FROM base AS postgres
+
+USER 0:0
+
+# Every supported major's client sits side by side under /usr/lib/postgresql/<major>/bin, because a
+# dump must be taken, and listed, by the client of the server's own major. PGDG signs its repository
+# with this key, and ca-certificates, which its HTTPS needs, is already in base.
+RUN mkdir -p /usr/share/postgresql-common/pgdg \
+	&& curl -fsSLo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+	&& echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+	&& apt-get update \
+	&& apt-get install -y --no-install-recommends postgresql-client-15 postgresql-client-16 postgresql-client-17 postgresql-client-18 \
+	&& rm -rf /var/lib/apt/lists/*
+
+# LD_BIND_NOW makes the dynamic linker resolve every symbol at start-up, so a client with a missing
+# library fails here, at build time, and not at the first run.
+RUN for tool in /usr/lib/postgresql/*/bin/pg_dump /usr/lib/postgresql/*/bin/pg_restore /usr/lib/postgresql/*/bin/psql; do \
+		LD_BIND_NOW=1 "${tool}" --version || exit 1; \
+	done
+
+COPY --chmod=0755 jobs/postgres /usr/local/bin/backup
+
+USER 65532:65532
+
+CMD ["/usr/local/bin/start"]
+
+LABEL org.opencontainers.image.description="Scheduled pg_dump of one PostgreSQL database, checked and uploaded to a versioned bucket"

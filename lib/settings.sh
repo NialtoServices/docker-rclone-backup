@@ -50,3 +50,43 @@ refuse_unknown_settings() {
 
   [ -z "${UNKNOWN_SETTINGS}" ] || fatal "unknown settings: ${UNKNOWN_SETTINGS}"
 }
+
+# Exactly one of DATABASE_PASSWORD and DATABASE_PASSWORD_FILE must be set. A file is read here, so a
+# missing or unreadable secret stops the container at start-up, and its contents replace
+# DATABASE_PASSWORD. Command substitution drops the trailing newline that editors and `echo` leave.
+load_database_password() {
+  if [ -n "${DATABASE_PASSWORD:-}" ] && [ -n "${DATABASE_PASSWORD_FILE:-}" ]
+  then
+    fatal "set one of 'DATABASE_PASSWORD' and 'DATABASE_PASSWORD_FILE', not both"
+  fi
+
+  if [ -n "${DATABASE_PASSWORD_FILE:-}" ]
+  then
+    [ -f "${DATABASE_PASSWORD_FILE}" ] && [ -r "${DATABASE_PASSWORD_FILE}" ] \
+      || fatal "'DATABASE_PASSWORD_FILE' is not a readable file: '${DATABASE_PASSWORD_FILE}'"
+
+    DATABASE_PASSWORD="$(cat "${DATABASE_PASSWORD_FILE}")" \
+      || fatal "failed to read '${DATABASE_PASSWORD_FILE}'"
+    [ -n "${DATABASE_PASSWORD}" ] || fatal "'DATABASE_PASSWORD_FILE' is empty: '${DATABASE_PASSWORD_FILE}'"
+
+    return 0
+  fi
+
+  [ -n "${DATABASE_PASSWORD:-}" ] || fatal "set one of 'DATABASE_PASSWORD' and 'DATABASE_PASSWORD_FILE'"
+}
+
+# DATABASE_TLS defaults to disabled. A CA file only means something when the server's certificate is
+# verified, so naming one under another mode is a mistake worth stopping for.
+require_database_tls() {
+  DATABASE_TLS="${DATABASE_TLS:-disabled}"
+
+  case "${DATABASE_TLS}" in
+    disabled | required | verify) ;;
+    *) fatal "'DATABASE_TLS' must be 'disabled', 'required' or 'verify', not '${DATABASE_TLS}'" ;;
+  esac
+
+  if [ -n "${DATABASE_TLS_CA_PATH:-}" ] && [ "${DATABASE_TLS}" != "verify" ]
+  then
+    fatal "'DATABASE_TLS_CA_PATH' is only used when 'DATABASE_TLS' is 'verify', not '${DATABASE_TLS}'"
+  fi
+}

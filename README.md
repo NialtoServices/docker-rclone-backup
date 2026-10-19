@@ -159,6 +159,81 @@ sqlite3 app.db 'PRAGMA integrity_check'
 
 Stop the application, replace its database file with the restored one (removing any `-wal` and `-shm` files beside the old one), and start it again.
 
+## PostgreSQL
+
+The `postgres` image dumps one PostgreSQL database with `pg_dump --format=custom` and uploads it to the target as `<database>.dump` (`app.dump` for a database called `app`). Servers 15, 16, 17 and 18 are supported. Before each run the image asks the server for its version and uses the `pg_dump` of that same major, so the dump is always taken by a matching client. A server of any other version, including one newer than the image, is refused with a message naming its version. The archive is checked with `pg_restore --list` before it is uploaded, and a dump that fails the check is not uploaded.
+
+| Variable | Description |
+|---|---|
+| `DATABASE_HOST` | The server's host name or address |
+| `DATABASE_PORT` | The server's port. Defaults to `5432` |
+| `DATABASE_USER` | The role to connect as; see [the backup role](#the-backup-role) |
+| `DATABASE_PASSWORD` | The role's password. Set this or `DATABASE_PASSWORD_FILE`, not both |
+| `DATABASE_PASSWORD_FILE` | The path of a file holding the password, such as a Docker or Compose secret, so it needn't sit in the container's environment. A trailing newline is ignored |
+| `DATABASE_NAME` | The database to dump. It becomes the object's name, so it must not contain `/` or start with `.` |
+| `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate; `verify` also checks that the certificate is trusted and names the host. Set `required` or `verify` for a managed database or any server across an untrusted network |
+| `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
+| `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
+| `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the settings below, so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
+
+Passwords with any characters work, and the password reaches `pg_dump` through its environment, never its arguments.
+
+- **Versioning is the history.** Each upload replaces the object at the target, so keep older dumps by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
+- **Every run adds a version.** A custom-format archive records when it was created, so two dumps of an unchanged database differ and the checksum comparison never finds a match.
+- **A migration can stop a run.** `pg_dump` waits up to a minute for the locks it needs, so a migration holding an exclusive lock for longer than that fails the run, which the monitor reports, instead of the dump waiting until the next schedule.
+- **The dump keeps ownership and privileges.** The restore decides what to do with them, as below.
+
+### The backup role
+
+Give the image a role of its own, not the application's or a superuser. It needs `pg_read_all_data` to read every table and sequence, `BYPASSRLS` so row-level security can't hide rows from the dump, and `SELECT` on each large object, which `pg_read_all_data` doesn't cover:
+
+```sql
+CREATE ROLE backup LOGIN BYPASSRLS PASSWORD '<password>';
+GRANT pg_read_all_data TO backup;
+GRANT SELECT ON LARGE OBJECT <oid> TO backup;
+```
+
+Repeat the last grant for every large object (`SELECT oid FROM pg_largeobject_metadata`), and again for each one created later. A database that holds no large objects needs only the first two statements. Without the grant on a large object, the dump fails instead of leaving it out.
+
+### Running it
+
+The image needs no volume and no particular uid, because everything it uses is reached over the network. Run it beside the database on a private network:
+
+```yaml
+services:
+  backup:
+    image: ghcr.io/nialtoservices/rclone-backup/postgres
+    stop_grace_period: 2m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,nodev,noexec,nosuid,size=512m
+    secrets:
+      - backup_password
+    environment:
+      DATABASE_HOST: database
+      DATABASE_USER: backup
+      DATABASE_PASSWORD_FILE: /run/secrets/backup_password
+      DATABASE_NAME: app
+      BACKUP_TARGET: b2:my-bucket/app
+      BACKUP_SCHEDULE: "0 3 * * *"
+      RCLONE_CONFIG_B2_TYPE: b2
+      RCLONE_CONFIG_B2_ACCOUNT: <application key id>
+      RCLONE_CONFIG_B2_KEY: <application key>
+```
+
+### Restoring
+
+Download the object from the target, create an empty database and restore into it with the `pg_restore` of the **server's own major**. A newer `pg_restore` can't restore into an older server: PostgreSQL 18's, for one, sends a setting that servers 14 to 16 don't know. The `postgres` image of your server's version has the right one:
+
+```sh
+createdb --username postgres restored
+pg_restore --username postgres --dbname restored --exit-on-error app.dump
+```
+
+Add `--no-owner` if the roles that owned the objects don't exist on the server you restore to, and `--no-acl` to skip the grants. A trusted extension in the dump is created as the restoring role, so restore with a role that may create it.
+
 ## Licence
 
 This project is licensed under the Apache-2.0 License - see the LICENSE file for details.

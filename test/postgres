@@ -1,0 +1,458 @@
+#!/bin/sh
+#
+# Tests for the postgres image, run from anywhere on a host with Docker:
+#
+#   test/postgres IMAGE
+#
+# Backs up and restores a seeded database on every supported server in test/servers, then checks the
+# image's refusals and failure modes once, against the newest server. Each run's output goes to a log
+# file that is shown only when a check fails.
+
+# The single-quoted scripts passed to `sh -c` expand inside the container, not on the host.
+# shellcheck disable=SC2016
+
+set -eu
+
+if [ "$#" -ne 1 ]
+then
+  echo "usage: $0 IMAGE" >&2
+  exit 2
+fi
+
+IMAGE="$1"
+TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# shellcheck source=lib.sh
+. "${TEST_DIR}/lib.sh"
+
+make_work_dir "${IMAGE}"
+
+TARGET_DIR="${WORK_DIR}/target"
+STAGING_DIR="${WORK_DIR}/staging"
+SECRETS_DIR="${WORK_DIR}/secrets"
+
+mkdir -m 0777 "${TARGET_DIR}" "${STAGING_DIR}" "${SECRETS_DIR}"
+
+NETWORK_NAME="postgres-test-$$"
+SERVER_NAME="postgres-server-$$"
+TLS_SERVER_NAME="postgres-tls-$$"
+
+SERVER_VERSIONS="15 16 17 18"
+NEWEST_VERSION=18
+UNSUPPORTED_VERSION=14
+
+ADMIN_PASSWORD="admin-secret"
+BACKUP_ROLE_PASSWORD="backup-secret"
+SPECIAL_PASSWORD='p@ss w'\''rd"$;'
+
+# How long a server may take to start accepting connections. Generous, because the host may be busy.
+SERVER_START_SECONDS=240
+
+# Set by start_server.
+SERVER_IMAGE=""
+
+docker network create "${NETWORK_NAME}" > /dev/null
+
+stop_server() {
+  docker rm --force "${SERVER_NAME}" "${TLS_SERVER_NAME}" > /dev/null 2>&1 || true
+}
+
+# Removes the servers and the network before the work directory goes, and keeps the exit status the
+# script was already exiting with.
+clean_up() {
+  EXIT_STATUS=$?
+
+  stop_server
+  docker network rm "${NETWORK_NAME}" > /dev/null 2>&1 || true
+  remove_work_dir "${EXIT_STATUS}"
+}
+
+trap clean_up EXIT
+
+server_image_for() {
+  grep "^postgres:$1@" "${TEST_DIR}/servers"
+}
+
+server_is_ready() {
+  docker exec "$1" pg_isready -h 127.0.0.1 -U postgres -q
+}
+
+# Retries a command once a second for SERVER_START_SECONDS.
+wait_for_server() {
+  ATTEMPT=1
+  while [ "${ATTEMPT}" -le "${SERVER_START_SECONDS}" ]
+  do
+    server_is_ready "$1" && return 0
+
+    sleep 1
+    ATTEMPT=$((ATTEMPT + 1))
+  done
+
+  return 1
+}
+
+# Runs SQL as the superuser in DATABASE on the server SERVER_NAME.
+server_sql() {
+  docker exec -e PGOPTIONS=--client-min-messages=warning "${SERVER_NAME}" psql -U postgres -d "$1" -XAt -v ON_ERROR_STOP=1 -c "$2"
+}
+
+# Creates the backup role with the grants the README asks for, apart from the large object's.
+create_backup_role() {
+  docker exec "$1" psql -U postgres -XAt -v ON_ERROR_STOP=1 -c "
+    CREATE ROLE backup LOGIN BYPASSRLS PASSWORD '${BACKUP_ROLE_PASSWORD}';
+    GRANT pg_read_all_data TO backup;
+  " > /dev/null
+}
+
+# Starts the server for VERSION and seeds the database app: a table of 1000 rows with an enum column,
+# a sequence at 4242 and one large object.
+start_server() {
+  SERVER_IMAGE="$(server_image_for "$1")"
+  stop_server
+
+  docker run --detach --name "${SERVER_NAME}" --network "${NETWORK_NAME}" \
+    -e "POSTGRES_PASSWORD=${ADMIN_PASSWORD}" "${SERVER_IMAGE}" > /dev/null \
+    && wait_for_server "${SERVER_NAME}" \
+    && create_backup_role "${SERVER_NAME}" \
+    && server_sql postgres "CREATE DATABASE app" > /dev/null \
+    && server_sql app "
+      CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+      CREATE TABLE notes (id serial PRIMARY KEY, mood mood NOT NULL, body text NOT NULL);
+      INSERT INTO notes (mood, body)
+        SELECT (ARRAY['sad', 'ok', 'happy'])[1 + index % 3]::mood, 'row ' || index FROM generate_series(1, 1000) AS index;
+      CREATE SEQUENCE counter;
+      SELECT setval('counter', 4242);
+      SELECT lo_from_bytea(424242, 'large object contents');
+      GRANT SELECT ON LARGE OBJECT 424242 TO backup;
+    " > /dev/null
+}
+
+# Runs the server image's own client tool against the server, reading the target as the application
+# user would. pg_restore of one major can't reliably restore another's dump, so the restore uses the
+# tool that ships with the server.
+server_tool() {
+  SERVER_TOOL="$1"
+  shift
+
+  docker run --rm --network "${NETWORK_NAME}" --user 1000:1000 \
+    -v "${TARGET_DIR}:/target:ro" \
+    -e "PGPASSWORD=${ADMIN_PASSWORD}" -e "PGHOST=${SERVER_NAME}" -e PGUSER=postgres \
+    --entrypoint "${SERVER_TOOL}" "${SERVER_IMAGE}" "$@"
+}
+
+# Runs a container from the image under the hardening baseline, with the connection settings of the
+# seeded server and the mounted directories. Further docker run options, the image and the command
+# follow; a repeated -e overrides the default.
+run_container() {
+  hardened_run --user 1000:1000 \
+    --network "${NETWORK_NAME}" \
+    -v "${TARGET_DIR}:/target" \
+    -v "${STAGING_DIR}:/staging" \
+    -v "${SECRETS_DIR}:/secrets:ro" \
+    -e "DATABASE_HOST=${SERVER_NAME}" \
+    -e DATABASE_USER=backup \
+    -e DATABASE_NAME=app \
+    -e BACKUP_TARGET=/target \
+    "$@"
+}
+
+# Runs the job with the backup role's password, plus any further docker run options. JOB_ARGUMENT,
+# when set, is passed to the job itself.
+run_job() {
+  run_container -e "DATABASE_PASSWORD=${BACKUP_ROLE_PASSWORD}" "$@" \
+    "${IMAGE}" /usr/local/bin/backup ${JOB_ARGUMENT:+"${JOB_ARGUMENT}"} > "${LOG_FILE}" 2>&1
+}
+
+# The job writes with mode 0600, so the host user can't read the target itself. This runs a command
+# in a container that sees it as the application does.
+in_target() {
+  hardened_run --user 1000:1000 -v "${TARGET_DIR}:/target:ro" "${IMAGE}" "$@"
+}
+
+target_is_empty() {
+  in_target sh -c '[ -z "$(find /target -mindepth 1)" ]'
+}
+
+staging_is_empty() {
+  hardened_run --user 1000:1000 -v "${STAGING_DIR}:/staging:ro" "${IMAGE}" sh -c '[ -z "$(find /staging -mindepth 1)" ]'
+}
+
+# Starts each check from empty directories and the default settings.
+prepare() {
+  empty_work_subdirectories
+  JOB_ARGUMENT=""
+}
+
+set_backup_password() {
+  server_sql postgres "ALTER ROLE backup PASSWORD '$(printf '%s' "$1" | sed "s/'/''/g")'" > /dev/null
+}
+
+# Prints what the restored database holds: the row count, the sequence, the large object, the enum.
+inspect_restored_database() {
+  docker exec "${SERVER_NAME}" psql -U postgres -d restored -XAt -c "
+    SELECT (SELECT count(*) FROM notes),
+      (SELECT last_value FROM counter),
+      convert_from(lo_get(424242), 'UTF8'),
+      (SELECT string_agg(enumlabel, ',' ORDER BY enumsortorder) FROM pg_enum);
+  "
+}
+
+# Restores /target/app.dump into a new database called restored.
+restore_dump() {
+  server_sql postgres "DROP DATABASE IF EXISTS restored" > /dev/null \
+    && server_sql postgres "CREATE DATABASE restored" > /dev/null \
+    && server_tool pg_restore -d restored --exit-on-error /target/app.dump
+}
+
+backup_restores_on_the_server() {
+  prepare
+
+  run_job \
+    && grep -q "PostgreSQL $1" "${LOG_FILE}" \
+    && restore_dump \
+    && [ "$(inspect_restored_database)" = "1000|4242|large object contents|sad,ok,happy" ] \
+    && staging_is_empty
+}
+
+unsupported_server_is_refused() {
+  prepare
+
+  ! run_job \
+    && grep -q "PostgreSQL ${UNSUPPORTED_VERSION} isn't supported; this image has clients for 15 to 18" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty
+}
+
+# Samples every process's arguments while the job runs, holding a table lock so pg_dump stays alive
+# long enough to be seen, then releases it. The job's own tools are the only processes the sampler
+# can see besides itself.
+password_with_shell_characters_works_and_stays_out_of_arguments() {
+  prepare
+  set_backup_password "${SPECIAL_PASSWORD}"
+
+  run_container -e "DATABASE_PASSWORD=${SPECIAL_PASSWORD}" -e "ADMIN_PASSWORD=${ADMIN_PASSWORD}" "${IMAGE}" sh -c '
+    admin_sql() {
+      PGPASSWORD="${ADMIN_PASSWORD}" /usr/lib/postgresql/18/bin/psql -h "${DATABASE_HOST}" -U postgres -d app -XAtc "$1"
+    }
+
+    # pg_sleep carries on after its client disconnects, so the lock is released by ending the session
+    # that holds it.
+    admin_sql "BEGIN; LOCK TABLE notes; SELECT pg_sleep(600)" > /dev/null 2>&1 &
+
+    until [ "$(admin_sql "SELECT count(*) FROM pg_locks WHERE mode = '\''AccessExclusiveLock'\'' AND relation = '\''notes'\''::regclass")" = 1 ]
+    do
+      sleep 0.2
+    done
+
+    : > /tmp/arguments
+    /usr/local/bin/backup > /tmp/job.log 2>&1 &
+    job=$!
+    seen=false
+
+    while kill -0 "${job}" 2> /dev/null
+    do
+      cat /proc/[0-9]*/cmdline >> /tmp/arguments 2> /dev/null
+
+      if [ "${seen}" = false ] && grep -aq "pg_[d]ump" /tmp/arguments
+      then
+        seen=true
+        admin_sql "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE mode = '\''AccessExclusiveLock'\'' AND relation = '\''notes'\''::regclass" > /dev/null
+      fi
+
+      sleep 0.1
+    done
+
+    wait "${job}"
+    status=$?
+
+    grep -aqF "${DATABASE_PASSWORD}" /tmp/arguments && echo PASSWORD_WAS_IN_ARGUMENTS
+    [ "${seen}" = true ] || echo PG_DUMP_WAS_NEVER_SEEN
+    cat /tmp/job.log
+    exit "${status}"
+  ' > "${LOG_FILE}" 2>&1 \
+    && ! grep -q -e PASSWORD_WAS_IN_ARGUMENTS -e PG_DUMP_WAS_NEVER_SEEN "${LOG_FILE}" \
+    && restore_dump \
+    && [ "$(inspect_restored_database)" = "1000|4242|large object contents|sad,ok,happy" ] \
+    && set_backup_password "${BACKUP_ROLE_PASSWORD}"
+}
+
+password_file_works() {
+  prepare
+  printf '%s\n' "${BACKUP_ROLE_PASSWORD}" > "${SECRETS_DIR}/password"
+
+  run_container -e DATABASE_PASSWORD_FILE=/secrets/password "${IMAGE}" /usr/local/bin/backup > "${LOG_FILE}" 2>&1 \
+    && restore_dump
+}
+
+both_password_forms_are_refused() {
+  prepare
+  printf '%s\n' "${BACKUP_ROLE_PASSWORD}" > "${SECRETS_DIR}/password"
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_PASSWORD_FILE=/secrets/password \
+    && grep -q "DATABASE_PASSWORD_FILE" "${LOG_FILE}" \
+    && ! run_container -e DATABASE_PASSWORD=x -e DATABASE_PASSWORD_FILE=/secrets/password \
+      "${IMAGE}" /usr/local/bin/backup > "${LOG_FILE}" 2>&1 \
+    && grep -q "not both" "${LOG_FILE}"
+}
+
+unreadable_password_file_is_refused() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_container -e DATABASE_PASSWORD_FILE=/secrets/missing "${IMAGE}" /usr/local/bin/backup --check > "${LOG_FILE}" 2>&1 \
+    && grep -q "/secrets/missing" "${LOG_FILE}"
+}
+
+missing_password_is_refused() {
+  prepare
+
+  ! run_container "${IMAGE}" /usr/local/bin/backup --check > "${LOG_FILE}" 2>&1 \
+    && grep -q "DATABASE_PASSWORD" "${LOG_FILE}"
+}
+
+unsafe_database_names_are_refused() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_NAME=nested/app \
+    && grep -q "nested/app" "${LOG_FILE}" \
+    && ! run_job -e DATABASE_NAME=.hidden \
+    && grep -q "\.hidden" "${LOG_FILE}"
+}
+
+unreachable_host_fails_within_a_minute() {
+  prepare
+  START_SECONDS="$(date +%s)"
+
+  # 192.0.2.0/24 is reserved for documentation, so nothing answers there.
+  ! run_job -e DATABASE_HOST=192.0.2.1 \
+    && [ "$(($(date +%s) - START_SECONDS))" -lt 60 ] \
+    && grep -q "192.0.2.1" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty
+}
+
+required_tls_against_a_server_without_tls_fails_clearly() {
+  prepare
+
+  ! run_job -e DATABASE_TLS=required \
+    && grep -qi "SSL" "${LOG_FILE}" \
+    && target_is_empty \
+    && staging_is_empty
+}
+
+# Starts a second server with a self-signed certificate for its own name, and leaves the certificate
+# in WORK_DIR as ca.crt. prepare empties SECRETS_DIR, so a check copies it there after preparing.
+start_tls_server() {
+  docker run --detach --name "${TLS_SERVER_NAME}" --network "${NETWORK_NAME}" \
+    -e "POSTGRES_PASSWORD=${ADMIN_PASSWORD}" -e "TLS_SERVER_NAME=${TLS_SERVER_NAME}" \
+    --entrypoint sh "${SERVER_IMAGE}" -c '
+      openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=${TLS_SERVER_NAME}" \
+        -addext "subjectAltName=DNS:${TLS_SERVER_NAME}" -keyout /tmp/server.key -out /tmp/server.crt 2> /dev/null \
+        && chown postgres:postgres /tmp/server.key \
+        && chmod 0600 /tmp/server.key \
+        && exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key
+    ' > /dev/null \
+    && wait_for_server "${TLS_SERVER_NAME}" \
+    && create_backup_role "${TLS_SERVER_NAME}" \
+    && docker cp "${TLS_SERVER_NAME}:/tmp/server.crt" "${WORK_DIR}/ca.crt" \
+    && chmod 0644 "${WORK_DIR}/ca.crt"
+}
+
+tls_required_and_verify_work_against_a_server_with_tls() {
+  start_tls_server \
+    && prepare \
+    && cp "${WORK_DIR}/ca.crt" "${SECRETS_DIR}/ca.crt" \
+    && run_job -e "DATABASE_HOST=${TLS_SERVER_NAME}" -e DATABASE_NAME=postgres -e DATABASE_TLS=required \
+    && in_target test -f /target/postgres.dump \
+    && run_job -e "DATABASE_HOST=${TLS_SERVER_NAME}" -e DATABASE_NAME=postgres -e DATABASE_TLS=verify \
+      -e DATABASE_TLS_CA_PATH=/secrets/ca.crt \
+    && prepare \
+    && ! run_job -e "DATABASE_HOST=${TLS_SERVER_NAME}" -e DATABASE_NAME=postgres -e DATABASE_TLS=verify \
+    && grep -qi "certificate" "${LOG_FILE}" \
+    && target_is_empty
+}
+
+# Everything the job leaves in /tmp besides its lock and rclone's cache is staged data. The check runs
+# inside the container, since the tmpfs goes with it.
+dump_larger_than_the_staging_space_fails_cleanly() {
+  prepare
+  server_sql app "CREATE TABLE padding AS SELECT index, md5(index::text) || md5((index + 1)::text) AS filler FROM generate_series(1, 80000) AS index" > /dev/null
+
+  JOB_STATUS=0
+  HARDENED_TMPFS_SIZE=1m run_container -e "DATABASE_PASSWORD=${BACKUP_ROLE_PASSWORD}" "${IMAGE}" sh -c '
+    /usr/local/bin/backup
+    status=$?
+
+    [ -z "$(find /tmp -mindepth 1 -not -name rclone-backup.lock -not -path "/tmp/rclone-cache*")" ] || echo STAGED_FILE_LEFT_BEHIND
+    exit "${status}"
+  ' > "${LOG_FILE}" 2>&1 || JOB_STATUS=$?
+
+  server_sql app "DROP TABLE padding" > /dev/null
+
+  [ "${JOB_STATUS}" -ne 0 ] \
+    && grep -q "failed to dump app" "${LOG_FILE}" \
+    && ! grep -q STAGED_FILE_LEFT_BEHIND "${LOG_FILE}" \
+    && target_is_empty
+}
+
+check_accepts_valid_settings_silently() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  run_job -e DATABASE_TLS=verify -e DATABASE_TLS_CA_PATH=/secrets/ca.crt -e DATABASE_PORT=5432 \
+    && [ ! -s "${LOG_FILE}" ] \
+    && target_is_empty
+}
+
+check_rejects_bad_tls_settings() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_TLS=sometimes \
+    && grep -q "sometimes" "${LOG_FILE}" \
+    && ! run_job -e DATABASE_TLS_CA_PATH=/secrets/ca.crt \
+    && grep -q "DATABASE_TLS_CA_PATH" "${LOG_FILE}"
+}
+
+an_unknown_database_setting_is_refused() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_PASWORD=typo \
+    && grep -q "DATABASE_PASWORD" "${LOG_FILE}"
+}
+
+LAST_VERSION="${SERVER_VERSIONS##* }"
+
+for VERSION in ${SERVER_VERSIONS}
+do
+  start_server "${VERSION}"
+
+  check "a backup of PostgreSQL ${VERSION} restores its rows, sequence, large object and enum" with_log backup_restores_on_the_server "${VERSION}"
+
+  [ "${VERSION}" = "${LAST_VERSION}" ] || stop_server
+done
+
+# The server that is left running is the newest, so the checks below all run against it.
+[ "${LAST_VERSION}" = "${NEWEST_VERSION}" ] || { echo "the last server must be the newest" >&2; exit 1; }
+
+check "a password with shell characters works and appears in no process arguments" with_log password_with_shell_characters_works_and_stays_out_of_arguments
+check "DATABASE_PASSWORD_FILE works" with_log password_file_works
+check "setting both password forms is refused" with_log both_password_forms_are_refused
+check "an unreadable DATABASE_PASSWORD_FILE is refused" with_log unreadable_password_file_is_refused
+check "a missing password is refused" with_log missing_password_is_refused
+check "a database name containing '/' or starting with '.' is refused at start" with_log unsafe_database_names_are_refused
+check "an unreachable host fails within 60 s and uploads nothing" with_log unreachable_host_fails_within_a_minute
+check "DATABASE_TLS=required against a server without TLS fails clearly and uploads nothing" with_log required_tls_against_a_server_without_tls_fails_clearly
+check "DATABASE_TLS=required and verify work against a server with TLS, and verify rejects an unknown CA" with_log tls_required_and_verify_work_against_a_server_with_tls
+check "a dump larger than the staging space fails, uploads nothing and leaves no staged file" with_log dump_larger_than_the_staging_space_fails_cleanly
+check "--check accepts valid settings without connecting or printing" with_log check_accepts_valid_settings_silently
+check "--check rejects an unknown DATABASE_TLS value and a CA path without verify" with_log check_rejects_bad_tls_settings
+check "an unknown DATABASE_ setting is refused" with_log an_unknown_database_setting_is_refused
+
+stop_server
+start_server "${UNSUPPORTED_VERSION}"
+
+check "PostgreSQL ${UNSUPPORTED_VERSION} is refused naming its version, and nothing is uploaded" with_log unsupported_server_is_refused
