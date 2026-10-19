@@ -2,8 +2,6 @@
 
 Hardened, shell-only images that back up a PostgreSQL, MariaDB or MySQL database, a SQLite database or a directory of files to any rclone remote on a cron schedule. Each image runs as a non-root user on a read-only root filesystem, and reports to a heartbeat monitor if you give it one.
 
-## Images and tags
-
 | Image | Backs up |
 |---|---|
 | `ghcr.io/nialtoservices/rclone-backup/postgres` | A PostgreSQL database |
@@ -12,23 +10,79 @@ Hardened, shell-only images that back up a PostgreSQL, MariaDB or MySQL database
 | `ghcr.io/nialtoservices/rclone-backup/sqlite` | A SQLite database |
 | `ghcr.io/nialtoservices/rclone-backup/files` | A directory of files |
 
-Every image is published for `linux/amd64` and `linux/arm64`. Each release is tagged with its full version (`1.2.3`), and with its minor version (`1.2`), its major version (`1`) and `latest` while it is the newest release in that series.
+Every run writes its backup to the target under a fixed name, replacing the object from the run before (`app.dump`, `app.sql.zst` or `app.db.zst` for a database), except `files`, which mirrors the source. The images keep no history of their own.
 
-The newest release is rebuilt every week to pick up updated Debian and PostgreSQL packages, and its tags are moved to the new build. Pin a major version to receive these rebuilds without breaking changes. Older releases are not rebuilt, so a major version stops receiving updates once the next one is released.
+> **Point the target at a bucket with versioning enabled.** The bucket's versions are the backup history, and without them a run that replaces an object destroys the previous backup, and a `files` run that mirrors a deletion destroys the file. The images can't check this: any rclone remote is accepted, and only some backends can report whether versioning is on.
+>
+> **Check the bucket's lifecycle rules as well.** Rules such as Backblaze B2's "keep only the last version" make old versions vanish within a day, which leaves you with a single copy that the next bad run overwrites.
+
+## The hardening baseline
+
+Every example in this README runs under the same settings, and so does every test. Start from them and loosen one only for a reason:
+
+```yaml
+services:
+  backup:
+    image: ghcr.io/nialtoservices/rclone-backup/<image>
+    user: "1000:1000"
+    stop_grace_period: 2m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,nodev,noexec,nosuid,size=512m
+```
+
+- **`user`** is needed by `files` and `sqlite`, which run as the uid and gid of the application whose data they read (see [Running as the folder's owner](#running-as-the-folders-owner) and [Running as the application's user](#running-as-the-applications-user)). The database images reach everything over the network, so they need no `user` at all.
+- **The image's own user is not root.** It is uid and gid `65532`, with no login shell and no home directory, so `user` is only ever needed to match a volume's owner.
+- **`read_only`, `cap_drop` and `no-new-privileges`** leave the container with no writable root filesystem, no capabilities and no way to gain any. Nothing in the images needs them back, except in the two root modes ([files](#root-mode) and [SQLite](#root-mode-1)).
+- **Everything the container writes at run time lives under `/tmp`**: the crontab, the lock that stops runs overlapping, rclone's cache and the staged dump or snapshot. That is why a `noexec` tmpfs is enough. The one exception is staging, which `BACKUP_STAGING_PATH` can move to a volume.
+- **Size the tmpfs for the staged file.** `size=512m` is a ceiling and not a reservation, but data held in a tmpfs is held in memory. A dump or snapshot larger than the space fails the run, uploads nothing and leaves nothing behind; either raise the size or move staging to a volume.
+- **`stop_grace_period: 2m`** gives a stopped run time to report its failure; see [Stopping the container](#stopping-the-container).
+
+The images also work without any of this, but there is no reason to run them that way.
+
+## Images and tags
+
+Every image is published for `linux/amd64` and `linux/arm64`. Each release is tagged with its full version (`1.2.3`), its minor series (`1.2`), its major series (`1`) and `latest`. `latest` always points at the newest release overall, while `1.2` and `1` point at the newest release in their own minor or major series. A new release moves each floating tag that it is the newest for.
+
+The newest release is rebuilt every week to pick up updated Debian packages and database client packages (PostgreSQL's from its own package repository, MariaDB's and SQLite's from Debian), and its tags are moved to the new build. The MySQL client is copied from a pinned `mysql` image instead, so it changes only when that pin does. Pin a major version to receive these rebuilds without breaking changes. Older releases are not rebuilt, so a major series stops receiving updates once the next one is released.
+
+## Configuring rclone
+
+`BACKUP_TARGET` (and `BACKUP_SOURCE` for `files`) names an rclone remote and a path, such as `b2:my-bucket/app`, or an absolute path inside the container. Any rclone flag can be set through the environment by upper-casing its name, replacing hyphens with underscores and adding the `RCLONE_` prefix: `--max-delete 100` becomes `RCLONE_MAX_DELETE=100`.
+
+Define the remote itself in one of two ways, and prefer either to a connection string with inline credentials such as `:b2,account=…,key=…:my-bucket`. The images log the target as given, so inline credentials end up in the container's log. They are redacted from the log sent to your monitor, but not from the container's own output.
+
+- **Environment variables**, as `RCLONE_CONFIG_<REMOTE>_<OPTION>`: `RCLONE_CONFIG_B2_TYPE=b2`, `RCLONE_CONFIG_B2_ACCOUNT=…` and `RCLONE_CONFIG_B2_KEY=…` define a remote called `b2`. This needs no file, and it is what the examples below use. Keep the values in an `env_file` rather than in the Compose file.
+- **A config file**, mounted read-only, with `RCLONE_CONFIG` pointing at it:
+
+  ```yaml
+  volumes:
+    - ./rclone.conf:/config/rclone.conf:ro
+  environment:
+    RCLONE_CONFIG: /config/rclone.conf
+  ```
+
+`RCLONE_CONFIG` is `/dev/null` in the image, so the environment-only setup runs without rclone noting a missing config file in a container that has no home directory. Setting `RCLONE_CONFIG` replaces that. Nothing is written to the config file, with one exception: **a remote that refreshes OAuth tokens** (Google Drive, OneDrive, Dropbox and similar) writes each new token back to it. Such a remote needs `RCLONE_CONFIG` to point at a writable file, on a volume, and so can't use a read-only mount. A remote that authenticates with a static key, as B2, S3 and SFTP do, never needs this.
+
+A key restricted to a single bucket can't create buckets, and rclone's check that the bucket exists can fail with a permissions error. For an S3 remote, set `RCLONE_S3_NO_CHECK_BUCKET=true` to skip it. The bucket must then already exist.
 
 ## Settings every image shares
 
 | Variable | Description |
 |---|---|
-| `BACKUP_SCHEDULE` | When to run: a five-field cron schedule (`0 3 * * *`), a macro such as `@daily` or `@hourly`, or `disabled` to keep the container running with nothing scheduled. Defaults to `0 0 * * *`. Seven-field schedules with seconds are accepted too, and `@reboot` is not |
+| `BACKUP_SCHEDULE` | When to run: a five-field cron schedule (`0 3 * * *`), a macro such as `@daily` or `@hourly`, or `disabled` to keep the container running with nothing scheduled. Defaults to `0 0 * * *`. Seven-field schedules with seconds are accepted too; `@reboot` and `@every` are not |
 | `BACKUP_TARGET` | The rclone remote and path that receives the backup (`b2:my-bucket/app`), or an absolute path inside the container |
+| `BACKUP_STAGING_PATH` | The `sqlite` and database images only: where the dump or snapshot is written before it is uploaded. Defaults to `/tmp`; see each image for how to size it |
 | `TZ` | The time zone the schedule and the log timestamps follow, for example `Europe/London`. Defaults to UTC |
 | `MONITOR_START_URL`, `MONITOR_SUCCESS_URL`, `MONITOR_FAILURE_URL` | Heartbeat monitor URLs, all optional; see [Monitoring](#monitoring) |
+| `RCLONE_*` | Passed through to rclone: any flag, or a remote's definition; see [Configuring rclone](#configuring-rclone) |
 
-Any rclone flag can be set through the environment by upper-casing its name, replacing hyphens with underscores and adding the `RCLONE_` prefix: `--max-delete 100` becomes `RCLONE_MAX_DELETE=100`. A remote needs no config file: `RCLONE_CONFIG_B2_TYPE`, `RCLONE_CONFIG_B2_ACCOUNT` and `RCLONE_CONFIG_B2_KEY` define one called `b2`. To use a config file instead, mount it and point `RCLONE_CONFIG` at it.
+Each image adds its own settings, listed in its section. `BACKUP_TARGET`, like `BACKUP_SOURCE` in `files`, is an rclone remote or an absolute path in every image. A relative path is refused, because it would resolve inside the container's own filesystem.
 
 - **The container checks its settings when it starts.** A bad schedule, a missing or malformed required setting, or any variable beginning `BACKUP_`, `MONITOR_`, `DATABASE_` or `SQLITE_` that the image doesn't read (a typo, or a setting that belongs to another image) stops the container with a message naming it, rather than failing at the first run. Variables with any other name are ignored.
-- **One run at a time.** A run that starts while another is still going is refused and logged. A scheduled run that would overlap is skipped the same way.
+- **One run at a time.** A run that starts while another is still going is refused and logged, and it reports to the monitor as a failed run like any other. A scheduled run that would overlap is refused the same way.
 
 ## Monitoring
 
@@ -56,6 +110,17 @@ Each request times out after 10 seconds and is retried up to 5 times, including 
 
 Stopping the container interrupts a running backup: the dump tool or rclone cleans up its partial files, the run is reported to the monitor as failed, and the container exits with 143. If the monitor can't be reached, reporting can take up to about 90 seconds, while Docker kills a container 10 seconds after asking it to stop. To give the report time to get through, set a longer grace period, such as `stop_grace_period: 2m` in Compose or `docker stop -t 120`.
 
+## Fetching a backup from the target
+
+Every restore starts by downloading the object, which needs nothing from these images. With rclone on your own machine and the remote defined as above:
+
+```sh
+export RCLONE_CONFIG_B2_TYPE=b2 RCLONE_CONFIG_B2_ACCOUNT=<application key id> RCLONE_CONFIG_B2_KEY=<application key>
+rclone copyto b2:my-bucket/app/app.dump app.dump
+```
+
+That fetches the current object. To fetch the one that an earlier run replaced, ask the bucket for its versions: `--b2-version-at "2026-10-01"` gives the object as it stood then, `--s3-version-at` does the same on S3, and `--b2-versions` or `--s3-versions` lists every version with a timestamp in its name. Each image's section below says what to do with the object once you have it.
+
 ## Files
 
 The `files` image mirrors one directory, or one rclone remote path, to the target with `rclone sync`. The target ends up as a copy of the source, so keep history by pointing the target at a bucket with versioning enabled.
@@ -68,8 +133,6 @@ The `files` image mirrors one directory, or one rclone remote path, to the targe
 |---|---|
 | `BACKUP_SOURCE` | Where to copy from: an rclone remote and path (`b2:my-source-bucket`), or an absolute path inside the container (a mounted volume at `/source`) |
 | `BACKUP_TARGET` | Where to copy to, in the same forms |
-
-A relative path is refused, because it would resolve inside the container's own filesystem.
 
 ### Running as the folder's owner
 
@@ -96,7 +159,12 @@ services:
       RCLONE_CONFIG_B2_TYPE: b2
       RCLONE_CONFIG_B2_ACCOUNT: <application key id>
       RCLONE_CONFIG_B2_KEY: <application key>
+
+volumes:
+  app-data:
 ```
+
+Add the service to the application's own Compose file, so that `app-data` is the volume the application already declares.
 
 ### Root mode
 
@@ -109,6 +177,14 @@ When the source holds files with different owners, no single uid can read them a
 
 Capabilities only take effect for root, and root inside a container is a larger target than an unprivileged uid, so prefer the owner's uid where one will do.
 
+### Restoring
+
+The target is a plain copy of the source, so restoring is copying it back. Copy into an empty directory, check it, and only then replace the original; `--b2-version-at` and `--s3-version-at` bring back files that a later run deleted or overwrote, as in [Fetching a backup from the target](#fetching-a-backup-from-the-target):
+
+```sh
+rclone copy b2:my-bucket/app-data ./restored
+```
+
 ## SQLite
 
 The `sqlite` image takes a consistent snapshot of one SQLite database with `VACUUM INTO` while the application keeps running, checks it with `PRAGMA integrity_check`, compresses it with zstd and uploads it to the target as `<file name>.zst` (`app.db.zst` for `/data/app.db`). The database file is never copied directly, which would capture a torn state of a database that is being written. A snapshot that fails its check is not uploaded, and the run fails.
@@ -117,9 +193,10 @@ The `sqlite` image takes a consistent snapshot of one SQLite database with `VACU
 |---|---|
 | `SQLITE_DATABASE` | The absolute path of the database file inside the container. It must be the file's real path: a path that is, or lies under, a symlink is refused, so the file backed up is always the one configured |
 | `BACKUP_TARGET` | Where to upload the snapshot: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
-| `BACKUP_STAGING_PATH` | Where the snapshot is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the settings below, so a database larger than the `/tmp` tmpfs needs a volume here. The staged file is deleted after every run |
+| `BACKUP_STAGING_PATH` | Where the snapshot is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the baseline's settings. See the sizing note below. The staged files are deleted after every run |
 
 - **Versioning is the history.** Each upload replaces the object at the target, so keep older snapshots by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
+- **Size the staging space for about twice the database.** The snapshot is a full copy of the database, and it is compressed into a second file before the first is removed, so the two briefly exist together. Make the `/tmp` tmpfs, or the volume at `BACKUP_STAGING_PATH`, large enough for both. A run that runs out of space fails, uploads nothing and leaves nothing behind.
 - **An unchanged database adds no version.** The upload is compared by checksum, so a snapshot identical to the object already at the target is skipped. A target that can't report a checksum, such as a `crypt` remote, is uploaded on every run instead, and adds a version each time.
 - **A missing database fails the run.** The file is opened for writing only if it already exists, so a wrong path or an unmounted volume never produces an empty database.
 
@@ -149,7 +226,12 @@ services:
       RCLONE_CONFIG_B2_TYPE: b2
       RCLONE_CONFIG_B2_ACCOUNT: <application key id>
       RCLONE_CONFIG_B2_KEY: <application key>
+
+volumes:
+  app-data:
 ```
+
+Add the service to the application's own Compose file, so that `app-data` is the volume the application already declares.
 
 ### Root mode
 
@@ -164,7 +246,7 @@ When the application's uid can't be matched, run as root and add back exactly tw
 
 ### Restoring
 
-Download the object from the target, then decompress it and check it. The result is an ordinary SQLite database file, and neither step needs this image:
+[Download the object](#fetching-a-backup-from-the-target), then decompress it and check it. The result is an ordinary SQLite database file, and neither step needs this image:
 
 ```sh
 zstd -d app.db.zst
@@ -188,13 +270,14 @@ The `postgres` image dumps one PostgreSQL database with `pg_dump --format=custom
 | `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate; `verify` also checks that the certificate is trusted and names the host. Set `required` or `verify` for a managed database or any server across an untrusted network |
 | `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA; it must be a readable file. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
 | `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
-| `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the settings below, so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
+| `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the [baseline](#the-hardening-baseline), so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
 
 Passwords with any characters work, and the password reaches `pg_dump` through its environment, never its arguments. Neither it nor any other connection detail is passed on to rclone.
 
 - **Versioning is the history.** Each upload replaces the object at the target, so keep older dumps by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
 - **Every run adds a version.** A custom-format archive records when it was created, so two dumps of an unchanged database differ and the checksum comparison never finds a match.
 - **A migration can stop a run.** `pg_dump` waits up to a minute for the locks it needs, so a migration holding an exclusive lock for longer than that fails the run, which the monitor reports, instead of the dump waiting until the next schedule.
+- **An unreachable server fails the run.** The connection attempt times out after 10 seconds, so a wrong host or a database that is down is reported straight away and not at the next schedule.
 - **The dump keeps ownership and privileges.** The restore decides what to do with them, as below.
 
 ### The backup role
@@ -235,11 +318,17 @@ services:
       RCLONE_CONFIG_B2_TYPE: b2
       RCLONE_CONFIG_B2_ACCOUNT: <application key id>
       RCLONE_CONFIG_B2_KEY: <application key>
+
+secrets:
+  backup_password:
+    file: ./backup_password.txt
 ```
+
+Put the backup role's password in `backup_password.txt`, keep it out of version control, and make sure the image's user (`65532`) can read it, because Compose gives a file secret the file's own permissions. `DATABASE_HOST: database` is the database's service name, so add the service to the database's Compose file, or attach it to the database's network.
 
 ### Restoring
 
-Download the object from the target, create an empty database and restore into it with the `pg_restore` of the **server's own major**. A newer `pg_restore` can't restore into an older server: PostgreSQL 18's, for one, sends a setting that servers 14 to 16 don't know. The `postgres` image of your server's version has the right one:
+[Download the object](#fetching-a-backup-from-the-target), create an empty database and restore into it with the `pg_restore` of the **server's own major**. A newer `pg_restore` can't restore into an older server: PostgreSQL 18's, for one, sends a setting that servers 14 to 16 don't know. The `postgres` image of your server's version has the right one:
 
 ```sh
 createdb --username postgres restored
@@ -263,14 +352,14 @@ The `mariadb` image dumps one MariaDB database with `mariadb-dump`, compresses i
 | `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate, and the run fails if the connection turns out not to be encrypted; `verify` also checks the certificate. Set `required` or `verify` for a managed database or any server across an untrusted network |
 | `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA; it must be a readable file. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
 | `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
-| `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the settings below, so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
+| `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the [baseline](#the-hardening-baseline), so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
 
 Passwords with any characters work, and the password reaches `mariadb-dump` through its environment, never its arguments. Neither it nor any other connection detail is passed on to rclone. The official `mariadb` image's own variables (`MARIADB_ROOT_PASSWORD`, `MARIADB_DATABASE` and the rest) are ignored, so an env file shared with the database container can't change which account or database is backed up.
 
 - **Versioning is the history.** Each upload replaces the object at the target, so keep older dumps by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
 - **An unchanged database adds no version.** The dump leaves out its own timestamp and zstd's output is deterministic, so a dump identical to the object already at the target is skipped by the checksum comparison. A target that can't report a checksum, such as a `crypt` remote, is uploaded on every run instead, and adds a version each time.
 - **History in system-versioned tables is kept.** The dump uses `--dump-history`, and restoring it brings back every row version, not only the current ones.
-- **Avoid schema migrations during a backup.** `--single-transaction` gives the dump a consistent view of the data, but it doesn't isolate the dump from a migration that changes tables while it runs. Schedule the backup away from migrations.
+- **Avoid schema migrations during a backup.** `--single-transaction` gives the dump a consistent view of the data, but it doesn't isolate the dump from a migration that changes tables while it runs, and the dump can come out inconsistent. A migration can also stall the dump altogether: `mariadb-dump` has no bound on how long it waits for a lock, so a migration holding one makes the run wait until the migration finishes, however long that takes. While it waits, each later scheduled run is refused as overlapping and reported to the monitor as a failure, so you are alerted. Schedule the backup away from migrations.
 - **A sequence restores with its next value moved on.** MariaDB restores a sequence with its next value at the end of its cache, so the numbers it hands out after a restore skip ahead.
 - **An unreachable server fails the run.** The image connects once before dumping, with a 10-second timeout, because `mariadb-dump` has no timeout of its own and would otherwise wait on the operating system for minutes.
 - **`required` is checked, not assumed.** The MariaDB 11.8 client falls back to an unencrypted connection when the server has no TLS and certificate checking is switched off, which is how `required` has to be asked for. The image therefore asks the server whether the connection is encrypted and fails the run if it isn't. MariaDB 11.4 and later servers generate their own certificate, so `required` works against them with no setup; a 10.11 server needs TLS configured first.
@@ -319,11 +408,17 @@ services:
       RCLONE_CONFIG_B2_TYPE: b2
       RCLONE_CONFIG_B2_ACCOUNT: <application key id>
       RCLONE_CONFIG_B2_KEY: <application key>
+
+secrets:
+  backup_password:
+    file: ./backup_password.txt
 ```
+
+Put the backup account's password in `backup_password.txt`, keep it out of version control, and make sure the image's user (`65532`) can read it, because Compose gives a file secret the file's own permissions. `DATABASE_HOST: database` is the database's service name, so add the service to the database's Compose file, or attach it to the database's network.
 
 ### Restoring
 
-Download the object from the target, create an empty database and restore into it with the `mariadb` client of your server's own version, as an account that may create the dump's objects (its routines and triggers keep their original definers, so `root` is the safe choice). The dump restores to any server from 10.11 on:
+[Download the object](#fetching-a-backup-from-the-target), create an empty database and restore into it with the `mariadb` client of your server's own version, as an account that may create the dump's objects (its routines and triggers keep their original definers, so `root` is the safe choice). The dump restores to any server from 10.11 on:
 
 ```sh
 mariadb --user root --execute 'CREATE DATABASE restored'
@@ -342,20 +437,20 @@ The `mysql` image dumps one MySQL database with Oracle's `mysqldump`, compresses
 | `DATABASE_PASSWORD` | The account's password. Set this or `DATABASE_PASSWORD_FILE`, not both |
 | `DATABASE_PASSWORD_FILE` | The path of a file holding the password, such as a Docker or Compose secret, so it needn't sit in the container's environment. A trailing newline, or a carriage return before it, is ignored |
 | `DATABASE_NAME` | The database to dump. It becomes the object's name, so it must not contain `/` or start with `.` or `-` |
-| `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate, and fails the run against a server that offers no TLS; `verify` also checks the certificate and that it names the server's host. Set `required` or `verify` for a managed database or any server across an untrusted network |
+| `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate, and fails the run against a server that offers no TLS; `verify` also checks the certificate and that it names the server's host. Set `required` or `verify` for a managed database or any server across an untrusted network; `disabled` is only for a network you trust, as the notes below explain |
 | `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA; it must be a readable file. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
 | `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
-| `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the settings below, so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
+| `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the [baseline](#the-hardening-baseline), so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
 
 Passwords with any characters work, and the password reaches `mysqldump` through its environment, never its arguments. Neither it nor any other connection detail is passed on to rclone. The official `mysql` image's own variables (`MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE` and the rest) are ignored, so an env file shared with the database container can't change which account or database is backed up.
 
 - **The account must use `caching_sha2_password`.** That is the default on every supported server, but the 9.7 client has no `mysql_native_password` plugin, so an account created with it fails the run with `Authentication plugin 'mysql_native_password' cannot be loaded`, and nothing is uploaded. Recreate such an account, or give the backup its own, with the default plugin.
 - **Versioning is the history.** Each upload replaces the object at the target, so keep older dumps by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
 - **An unchanged database adds no version.** The dump leaves out its own timestamp and zstd's output is deterministic, so a dump identical to the object already at the target is skipped by the checksum comparison. A target that can't report a checksum, such as a `crypt` remote, is uploaded on every run instead, and adds a version each time.
-- **Avoid schema migrations during a backup.** `--single-transaction` gives the dump a consistent view of the data, but it doesn't isolate the dump from a migration that changes tables while it runs. Schedule the backup away from migrations.
+- **Avoid schema migrations during a backup.** `--single-transaction` gives the dump a consistent view of the data, but it doesn't isolate the dump from a migration that changes tables while it runs, and the dump can come out inconsistent. A migration can also stall the dump altogether: `mysqldump` has no bound on how long it waits for a lock, so a migration holding one makes the run wait until the migration finishes, however long that takes. While it waits, each later scheduled run is refused as overlapping and reported to the monitor as a failure, so you are alerted. Schedule the backup away from migrations.
 - **The dump carries no replication state or masking policies.** It is taken with `--set-gtid-purged=OFF`, so it restores into a server with other transactions, and with `--skip-masking-policies`, because the 9.x client otherwise prints an error for them on a community server. Any line the client prints with `error` in it fails the run even when the client exits 0.
 - **An unreachable server fails the run.** The image connects once before dumping, with a 10-second timeout, because `mysqldump` has no timeout of its own and would otherwise wait on the operating system for minutes.
-- **Without TLS the password travels RSA-encrypted.** With `DATABASE_TLS=disabled` the image asks the server for its RSA public key, which `caching_sha2_password` needs to log in over an unencrypted connection until the server has cached the account. That protects the password, not the data, and a connection across a network you don't trust needs `required` or `verify`.
+- **`DATABASE_TLS=disabled` fetches the server's key without verifying it.** `caching_sha2_password` logs in over an unencrypted connection by encrypting the password with the server's RSA public key, so with `disabled` the image adds `--get-server-public-key` and the client takes the key from whichever server answers. Nothing proves that the key belongs to your server. On a network you control that is fine, but on an untrusted network an active attacker who can intercept the connection can substitute their own key and so learn the password. Even without an attacker, the data itself travels unencrypted. Use `required` or `verify` there.
 
 ### The backup account
 
@@ -395,11 +490,17 @@ services:
       RCLONE_CONFIG_B2_TYPE: b2
       RCLONE_CONFIG_B2_ACCOUNT: <application key id>
       RCLONE_CONFIG_B2_KEY: <application key>
+
+secrets:
+  backup_password:
+    file: ./backup_password.txt
 ```
+
+Put the backup account's password in `backup_password.txt`, keep it out of version control, and make sure the image's user (`65532`) can read it, because Compose gives a file secret the file's own permissions. `DATABASE_HOST: database` is the database's service name, so add the service to the database's Compose file, or attach it to the database's network.
 
 ### Restoring
 
-Download the object from the target, create an empty database and restore into it with the `mysql` client of your server's own version, as an account that may create the dump's objects (its routines and triggers keep their original definers, so `root` is the safe choice). The dump restores to any server from 8.0 on:
+[Download the object](#fetching-a-backup-from-the-target), create an empty database and restore into it with the `mysql` client of your server's own version, as an account that may create the dump's objects (its routines and triggers keep their original definers, so `root` is the safe choice). The dump restores to any server from 8.0 on:
 
 ```sh
 mysql --user root --execute 'CREATE DATABASE restored'
@@ -459,12 +560,34 @@ GitHub disables the weekly rebuild after 60 days without repository activity. To
 
 ### Tests
 
-Before anything is published, CI lints the scripts with shellcheck and runs every image's tests on each platform. To run the tests for the workflow scripts locally:
+Before anything is published, CI lints the scripts with shellcheck and the workflows with actionlint, then builds every image and runs its tests on each platform. The suites need only Docker. Each takes the image to test, and the database suites pull the server images listed in `test/servers`:
+
+```sh
+docker build --target files --tag rclone-backup/files:test .
+test/files rclone-backup/files:test
+test/shared rclone-backup/files:test
+test/base rclone-backup/files:test
+```
+
+`test/shared` (scheduling, monitoring and stopping) and `test/base` (what every image carries) run against the `files` image, which is the shared base plus one script. Each of the other images has a suite of its own, `test/sqlite`, `test/postgres`, `test/mariadb` and `test/mysql`, taking the same argument. The workflow scripts' tests take none:
 
 ```sh
 test/github-scripts
 ```
 
-## Licence
+## Licences
 
-This project is licensed under the Apache-2.0 License - see the LICENSE file for details.
+This project is licensed under the Apache License 2.0; see the [LICENSE](LICENSE) file. Each image also contains software under other licences. This repository does not redistribute their source: it is available from the projects below, and each image's own copy of every Debian package's licence is in `/usr/share/doc/<package>/copyright`.
+
+| Component | In | Licence | Source |
+|---|---|---|---|
+| [rclone](https://rclone.org) | every image | MIT | [github.com/rclone/rclone](https://github.com/rclone/rclone) |
+| [supercronic](https://github.com/aptible/supercronic) | every image | MIT | [github.com/aptible/supercronic](https://github.com/aptible/supercronic) |
+| [tini](https://github.com/krallin/tini) (Debian's package) | every image | MIT | [github.com/krallin/tini](https://github.com/krallin/tini) |
+| Debian packages (`curl`, `procps`, `zstd`, `tzdata`, `ca-certificates` and the rest of the base system) | every image | Each package's own, mostly GPL, LGPL, BSD and MIT | [sources.debian.org](https://sources.debian.org), or `apt-get source <package>` on Debian 13 |
+| `sqlite3` (Debian's package) | `sqlite` | Public domain | [sqlite.org](https://sqlite.org/src) |
+| PostgreSQL client programs (PostgreSQL's own package repository) | `postgres` | PostgreSQL Licence | [git.postgresql.org](https://git.postgresql.org/gitweb/?p=postgresql.git) |
+| MariaDB client (Debian's `mariadb-client` package) | `mariadb` | GPL-2.0 | [github.com/MariaDB/server](https://github.com/MariaDB/server) |
+| MySQL client (`mysql` and `mysqldump`, copied from the official `mysql` image) | `mysql` | GPL-2.0, with Oracle's Universal FOSS Exception | [github.com/mysql/mysql-server](https://github.com/mysql/mysql-server) |
+
+The [Dockerfile](Dockerfile) pins rclone, supercronic and the MySQL client's source image. Everything else is the version that Debian 13 (trixie) or PostgreSQL's package repository held when the image was built.

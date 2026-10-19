@@ -14,8 +14,9 @@ check() {
   fi
 }
 
-# Runs a throwaway container under the hardening baseline from the README. HARDENED_TMPFS_SIZE
-# resizes /tmp for tests that fill it; passing a second --tmpfs for /tmp would be a conflict.
+# Runs a throwaway container under the settings in the README's "The hardening baseline" section.
+# HARDENED_TMPFS_SIZE resizes /tmp for tests that fill it; passing a second --tmpfs for /tmp would
+# be a conflict.
 hardened_run() {
   docker run \
     --rm \
