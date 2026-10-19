@@ -1,0 +1,7 @@
+self-hosted-runner:
+  # actionlint's built-in list of GitHub-hosted runner labels lags GitHub's own, and an unknown label
+  # fails the lint. Each label listed here is a hosted runner it doesn't know yet; once the pinned
+  # actionlint knows it, its line can go.
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
