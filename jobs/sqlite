@@ -3,7 +3,7 @@
 # Snapshots SQLITE_DATABASE with VACUUM INTO, checks the snapshot, compresses it and uploads it to
 # BACKUP_TARGET as <file name>.zst. With --check, validates the settings, prints nothing and exits 0.
 
-set -eu
+set -eu -o pipefail
 
 umask 077
 

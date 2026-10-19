@@ -3,7 +3,7 @@
 # Mirrors BACKUP_SOURCE to BACKUP_TARGET with rclone sync, deleting from the target whatever the
 # source lacks. With --check, validates the settings, prints nothing and exits 0.
 
-set -eu
+set -eu -o pipefail
 
 umask 077
 

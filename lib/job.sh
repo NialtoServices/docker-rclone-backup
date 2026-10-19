@@ -40,7 +40,9 @@ upload_staged_file() {
   TARGET_FEATURES="$(rclone backend features "${BACKUP_TARGET}")" \
     || fatal "failed to read the features of ${BACKUP_TARGET}"
 
-  if printf '%s' "${TARGET_FEATURES}" | tr -d ' \t\n' | grep -q '"Hashes":\["'
+  # grep reads all of its input, because under pipefail a `grep -q` that exits at the first match can
+  # leave printf or tr with a broken pipe, which would turn a match into a failed pipeline.
+  if printf '%s' "${TARGET_FEATURES}" | tr -d ' \t\n' | grep '"Hashes":\["' > /dev/null
   then
     info "uploading ${UPLOAD_DESTINATION}, skipping it if the target already holds the same checksum"
     rclone copyto --checksum "${UPLOAD_SOURCE_PATH}" "${UPLOAD_DESTINATION}" \

@@ -4,7 +4,7 @@
 # BACKUP_TARGET as <DATABASE_NAME>.dump. With --check, validates the settings, prints nothing and
 # exits 0.
 
-set -eu
+set -eu -o pipefail
 
 umask 077
 
