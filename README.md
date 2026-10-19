@@ -74,8 +74,8 @@ A key restricted to a single bucket can't create buckets, and rclone's check tha
 |---|---|
 | `BACKUP_SCHEDULE` | When to run: a five-field cron schedule (`0 3 * * *`), a macro such as `@daily` or `@hourly`, or `disabled` to keep the container running with nothing scheduled. Defaults to `0 0 * * *`. `@reboot` and `@every` are not accepted, and neither are schedules with a seconds or year field |
 | `BACKUP_TARGET` | The rclone remote and path that receives the backup (`b2:my-bucket/app`), or an absolute path inside the container |
-| `BACKUP_STAGING_PATH` | The `sqlite` and database images only: where the dump or snapshot is written before it is uploaded. Defaults to `/tmp`; see each image for how to size it |
-| `TZ` | The time zone the schedule and the log timestamps follow, for example `Europe/London`. Defaults to UTC |
+| `BACKUP_STAGING_PATH` | The `sqlite` and database images only: where the dump or snapshot is written before it is uploaded. It must be an absolute path to a writable directory, or the container stops at start-up. Defaults to `/tmp`; see each image for how to size it |
+| `TZ` | The time zone the schedule and the log timestamps follow, for example `Europe/London`. It must name a file in the time zone database, and a name that doesn't stops the container at start-up. Defaults to UTC |
 | `MONITOR_START_URL`, `MONITOR_SUCCESS_URL`, `MONITOR_FAILURE_URL` | Heartbeat monitor URLs, all optional; see [Monitoring](#monitoring) |
 | `RCLONE_*` | Passed through to rclone: any flag, or a remote's definition; see [Configuring rclone](#configuring-rclone) |
 

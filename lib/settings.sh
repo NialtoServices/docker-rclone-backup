@@ -114,3 +114,32 @@ require_database_tls() {
       || fatal "'DATABASE_TLS_CA_PATH' is not a readable file: '${DATABASE_TLS_CA_PATH}'"
   fi
 }
+
+# An unset or empty TZ means UTC. A set one has to name a file in the zoneinfo database, because
+# supercronic and the log timestamps fall back to UTC for a name they can't load, so a typo would move
+# every scheduled run by the zone's offset without a word. A leading colon is the POSIX spelling of a
+# file name, and `..` would reach files outside the database.
+require_time_zone() {
+  case "${TZ:-}" in
+    "") return 0 ;;
+    *..*) ;;
+    *) [ -f "/usr/share/zoneinfo/${TZ#:}" ] && return 0 ;;
+  esac
+
+  fatal "'TZ' must name a time zone in /usr/share/zoneinfo (e.g. 'Europe/London'), not '${TZ}'"
+}
+
+# BACKUP_STAGING_PATH is optional, and an empty value counts as unset. A set one must be an absolute
+# path to a directory the job can create files in, or every run would fail at the first dump with the
+# operating system's own message.
+require_staging_path() {
+  [ -n "${BACKUP_STAGING_PATH:-}" ] || return 0
+
+  case "${BACKUP_STAGING_PATH}" in
+    /*) ;;
+    *) fatal "'BACKUP_STAGING_PATH' must be an absolute path, not '${BACKUP_STAGING_PATH}'" ;;
+  esac
+
+  [ -d "${BACKUP_STAGING_PATH}" ] && [ -w "${BACKUP_STAGING_PATH}" ] && [ -x "${BACKUP_STAGING_PATH}" ] \
+    || fatal "'BACKUP_STAGING_PATH' is not a writable directory: '${BACKUP_STAGING_PATH}'"
+}

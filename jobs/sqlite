@@ -21,6 +21,8 @@ esac
 
 refuse_unknown_settings SQLITE_DATABASE BACKUP_STAGING_PATH
 require_settings SQLITE_DATABASE BACKUP_TARGET
+require_time_zone
+require_staging_path
 require_location BACKUP_TARGET
 
 case "${SQLITE_DATABASE}" in

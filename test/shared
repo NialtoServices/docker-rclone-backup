@@ -132,6 +132,30 @@ invalid_schedules_stop_the_container() {
   done
 }
 
+# An unknown zone would otherwise fall back to UTC without a word, shifting every scheduled run.
+time_zone_must_name_a_zoneinfo_file() {
+  for TIME_ZONE in Europe/Lndon Europe ../zoneinfo/UTC 'UTC+1x'
+  do
+    if ! start_stops_with_message "'TZ' must name a time zone" -e "TZ=${TIME_ZONE}"
+    then
+      echo "'${TIME_ZONE}' was not refused" >&2
+      return 1
+    fi
+  done
+
+  for TIME_ZONE in Europe/London UTC :America/New_York
+  do
+    START_STATUS=0
+    run_start_with_valid_settings -e "TZ=${TIME_ZONE}" || START_STATUS=$?
+
+    if [ "${START_STATUS}" -ne 124 ]
+    then
+      echo "'${TIME_ZONE}' was refused" >&2
+      return 1
+    fi
+  done
+}
+
 disabled_schedule_keeps_running_with_nothing_scheduled() {
   start_in_background -e BACKUP_SCHEDULE=disabled
   sleep 2
@@ -393,6 +417,7 @@ settings_helpers_refuse_bad_object_names() {
 
 check "a valid schedule is accepted" with_log valid_schedules_keep_running
 check "an invalid schedule stops the container with exit 1" with_log invalid_schedules_stop_the_container
+check "a TZ without a file in /usr/share/zoneinfo stops the container" with_log time_zone_must_name_a_zoneinfo_file
 check "a disabled schedule keeps running with nothing scheduled" with_log disabled_schedule_keeps_running_with_nothing_scheduled
 check "an unknown setting stops the container" with_log unknown_settings_stop_the_container
 check "a missing required setting stops the container at start-up, not at the first run" with_log missing_settings_stop_the_container_at_start

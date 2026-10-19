@@ -281,6 +281,22 @@ check_rejects_a_relative_database_path() {
     && grep -q "data/app.db" "${LOG_FILE}"
 }
 
+check_rejects_an_unusable_staging_path() {
+  prepare_directories
+  JOB_ARGUMENT="--check"
+
+  for STAGING_PATH in staging /missing /etc/hostname /staging-readonly
+  do
+    if run_job /data/app.db /target -v "${STAGING_DIR}:/staging-readonly:ro" -e "BACKUP_STAGING_PATH=${STAGING_PATH}" \
+      || ! grep -q "BACKUP_STAGING_PATH" "${LOG_FILE}" \
+      || ! grep -q "'${STAGING_PATH}'" "${LOG_FILE}"
+    then
+      echo "'${STAGING_PATH}' was not refused" >&2
+      return 1
+    fi
+  done
+}
+
 an_unknown_sqlite_setting_is_refused() {
   prepare_directories
   JOB_ARGUMENT="--check"
@@ -303,4 +319,5 @@ check "a bare remote target ending in a slash keeps it" with_log bare_remote_roo
 check "a database file name with quotes and URI characters is backed up" with_log unusual_file_name_is_backed_up
 check "--check accepts valid settings without snapshotting or printing" with_log check_accepts_valid_settings_silently
 check "--check rejects a relative database path" with_log check_rejects_a_relative_database_path
+check "--check rejects a BACKUP_STAGING_PATH that isn't an absolute, writable directory" with_log check_rejects_an_unusable_staging_path
 check "an unknown SQLITE_ setting is refused" with_log an_unknown_sqlite_setting_is_refused

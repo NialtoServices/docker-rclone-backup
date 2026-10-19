@@ -21,6 +21,7 @@ esac
 
 refuse_unknown_settings BACKUP_SOURCE
 require_settings BACKUP_SOURCE BACKUP_TARGET
+require_time_zone
 require_location BACKUP_SOURCE
 require_location BACKUP_TARGET
 
