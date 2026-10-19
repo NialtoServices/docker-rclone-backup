@@ -234,6 +234,88 @@ pg_restore --username postgres --dbname restored --exit-on-error app.dump
 
 Add `--no-owner` if the roles that owned the objects don't exist on the server you restore to, and `--no-acl` to skip the grants. A trusted extension in the dump is created as the restoring role, so restore with a role that may create it.
 
+## MariaDB
+
+The `mariadb` image dumps one MariaDB database with `mariadb-dump`, compresses it with zstd and uploads it to the target as `<database>.sql.zst` (`app.sql.zst` for a database called `app`). Servers 10.11, 11.4, 11.8 and later are supported, all by the one client the image carries, MariaDB 11.8's. The compressed dump is checked with `zstd --test` before it is uploaded, and a dump that fails the check, or whose client printed an error, is not uploaded.
+
+| Variable | Description |
+|---|---|
+| `DATABASE_HOST` | The server's host name or address |
+| `DATABASE_PORT` | The server's port, a positive integer. Defaults to `3306` |
+| `DATABASE_USER` | The account to connect as; see [the backup account](#the-backup-account) |
+| `DATABASE_PASSWORD` | The account's password. Set this or `DATABASE_PASSWORD_FILE`, not both |
+| `DATABASE_PASSWORD_FILE` | The path of a file holding the password, such as a Docker or Compose secret, so it needn't sit in the container's environment. A trailing newline, or a carriage return before it, is ignored |
+| `DATABASE_NAME` | The database to dump. It becomes the object's name, so it must not contain `/` or start with `.` |
+| `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate, and the run fails if the connection turns out not to be encrypted; `verify` also checks the certificate. Set `required` or `verify` for a managed database or any server across an untrusted network |
+| `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA; it must be a readable file. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
+| `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
+| `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the settings below, so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
+
+Passwords with any characters work, and the password reaches `mariadb-dump` through its environment, never its arguments. Neither it nor any other connection detail is passed on to rclone. The official `mariadb` image's own variables (`MARIADB_ROOT_PASSWORD`, `MARIADB_DATABASE` and the rest) are ignored, so an env file shared with the database container can't change which account or database is backed up.
+
+- **Versioning is the history.** Each upload replaces the object at the target, so keep older dumps by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
+- **An unchanged database adds no version.** The dump leaves out its own timestamp and zstd's output is deterministic, so a dump identical to the object already at the target is skipped by the checksum comparison. A target that can't report a checksum, such as a `crypt` remote, is uploaded on every run instead, and adds a version each time.
+- **History in system-versioned tables is kept.** The dump uses `--dump-history`, and restoring it brings back every row version, not only the current ones.
+- **Avoid schema migrations during a backup.** `--single-transaction` gives the dump a consistent view of the data, but it doesn't isolate the dump from a migration that changes tables while it runs. Schedule the backup away from migrations.
+- **A sequence restores with its next value moved on.** MariaDB restores a sequence with its next value at the end of its cache, so the numbers it hands out after a restore skip ahead.
+- **An unreachable server fails the run.** The image connects once before dumping, with a 10-second timeout, because `mariadb-dump` has no timeout of its own and would otherwise wait on the operating system for minutes.
+- **`required` is checked, not assumed.** The MariaDB 11.8 client falls back to an unencrypted connection when the server has no TLS and certificate checking is switched off, which is how `required` has to be asked for. The image therefore asks the server whether the connection is encrypted and fails the run if it isn't. MariaDB 11.4 and later servers generate their own certificate, so `required` works against them with no setup; a 10.11 server needs TLS configured first.
+- **`verify` without a CA file accepts a server's own certificate.** The 11.8 client can prove a self-signed certificate genuine through the account's password, so `verify` works against 11.4 and later servers that generate their own certificate. Give `DATABASE_TLS_CA_PATH` to trust only a particular authority.
+
+### The backup account
+
+Give the image an account of its own, not the application's or root. It needs `SELECT`, `SHOW VIEW`, `TRIGGER` and `EVENT` on the database, plus a privilege that lets it read stored routines, and which one depends on the server's version:
+
+```sql
+CREATE USER 'backup'@'%' IDENTIFIED BY '<password>';
+GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON app.* TO 'backup'@'%';
+
+-- MariaDB 11.3 and later:
+GRANT SHOW CREATE ROUTINE ON app.* TO 'backup'@'%';
+
+-- MariaDB 10.11:
+GRANT SELECT ON mysql.proc TO 'backup'@'%';
+```
+
+**Without the routine privilege the dump silently leaves out every stored procedure and function, and the run still succeeds.** Neither the client nor the image reports it, and the backup looks complete until a restore finds the routines missing. Check by listing the routines in the dump: `zstd -dc app.sql.zst | grep -E '^CREATE .*(PROCEDURE|FUNCTION)'`.
+
+### Running it
+
+The image needs no volume and no particular uid, because everything it uses is reached over the network. Run it beside the database on a private network:
+
+```yaml
+services:
+  backup:
+    image: ghcr.io/nialtoservices/rclone-backup/mariadb
+    stop_grace_period: 2m
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,nodev,noexec,nosuid,size=512m
+    secrets:
+      - backup_password
+    environment:
+      DATABASE_HOST: database
+      DATABASE_USER: backup
+      DATABASE_PASSWORD_FILE: /run/secrets/backup_password
+      DATABASE_NAME: app
+      BACKUP_TARGET: b2:my-bucket/app
+      BACKUP_SCHEDULE: "0 3 * * *"
+      RCLONE_CONFIG_B2_TYPE: b2
+      RCLONE_CONFIG_B2_ACCOUNT: <application key id>
+      RCLONE_CONFIG_B2_KEY: <application key>
+```
+
+### Restoring
+
+Download the object from the target, create an empty database and restore into it with the `mariadb` client of your server's own version, as an account that may create the dump's objects (its routines and triggers keep their original definers, so `root` is the safe choice). The dump restores to any server from 10.11 on:
+
+```sh
+mariadb --user root --execute 'CREATE DATABASE restored'
+zstd -dc app.sql.zst | mariadb --user root restored
+```
+
 ## Licence
 
 This project is licensed under the Apache-2.0 License - see the LICENSE file for details.

@@ -151,3 +151,29 @@ USER 65532:65532
 CMD ["/usr/local/bin/start"]
 
 LABEL org.opencontainers.image.description="Scheduled pg_dump of one PostgreSQL database, checked and uploaded to a versioned bucket"
+
+FROM base AS mariadb
+
+USER 0:0
+
+# Debian's mariadb-client also installs /usr/bin/mysql and /usr/bin/mysqldump as links to MariaDB's
+# own tools. They're removed so the image carries one name for each tool, and nothing here can reach
+# for a MySQL client that isn't there.
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends mariadb-client \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& rm /usr/bin/mysql /usr/bin/mysqldump
+
+# LD_BIND_NOW makes the dynamic linker resolve every symbol at start-up, so a client with a missing
+# library fails here, at build time, and not at the first run.
+RUN for tool in /usr/bin/mariadb /usr/bin/mariadb-dump; do \
+		LD_BIND_NOW=1 "${tool}" --version || exit 1; \
+	done
+
+COPY --chmod=0755 jobs/mariadb /usr/local/bin/backup
+
+USER 65532:65532
+
+CMD ["/usr/local/bin/start"]
+
+LABEL org.opencontainers.image.description="Scheduled mariadb-dump of one MariaDB database, checked and uploaded to a versioned bucket"

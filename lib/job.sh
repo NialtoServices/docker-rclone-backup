@@ -51,3 +51,23 @@ upload_staged_file() {
       || fatal "failed to upload ${UPLOAD_DESTINATION}"
   fi
 }
+
+# Logs each line that TOOL_NAME wrote to the file STDERR_PATH as a warning, and stops the run when any
+# line mentions an error. A tool such as mysqldump can print `Error: ...` and still exit 0, so its
+# exit status alone doesn't prove the dump is whole.
+fail_on_error_lines() {
+  ERROR_SCAN_PATH="$1"
+  ERROR_SCAN_TOOL_NAME="$2"
+  ERROR_LINE_FOUND=false
+
+  while IFS= read -r ERROR_SCAN_LINE || [ -n "${ERROR_SCAN_LINE}" ]
+  do
+    warn "${ERROR_SCAN_LINE}"
+
+    case "${ERROR_SCAN_LINE}" in
+      *[Ee][Rr][Rr][Oo][Rr]*) ERROR_LINE_FOUND=true ;;
+    esac
+  done < "${ERROR_SCAN_PATH}"
+
+  [ "${ERROR_LINE_FOUND}" = false ] || fatal "${ERROR_SCAN_TOOL_NAME} reported an error, so the dump can't be trusted"
+}

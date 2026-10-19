@@ -1,0 +1,101 @@
+#!/bin/sh
+#
+# Dumps DATABASE_NAME with mariadb-dump, compresses and checks the dump and uploads it to
+# BACKUP_TARGET as <DATABASE_NAME>.sql.zst. With --check, validates the settings, prints nothing and
+# exits 0.
+
+set -eu -o pipefail
+
+umask 077
+
+. /usr/local/lib/rclone-backup/log.sh
+. /usr/local/lib/rclone-backup/settings.sh
+. /usr/local/lib/rclone-backup/job.sh
+
+CHECK_ONLY=false
+
+case "${1:-}" in
+  --check) CHECK_ONLY=true ;;
+  "") ;;
+  *) fatal "unknown argument '$1'" ;;
+esac
+
+refuse_unknown_settings DATABASE_HOST DATABASE_PORT DATABASE_USER DATABASE_PASSWORD DATABASE_PASSWORD_FILE DATABASE_NAME DATABASE_TLS DATABASE_TLS_CA_PATH BACKUP_STAGING_PATH
+require_settings DATABASE_HOST DATABASE_USER DATABASE_NAME BACKUP_TARGET
+require_location BACKUP_TARGET
+require_object_name DATABASE_NAME
+require_database_port
+load_database_password
+require_database_tls
+
+if [ "${CHECK_ONLY}" = true ]
+then
+  exit 0
+fi
+
+acquire_run_lock
+open_staging_directory
+
+SERVER_PORT="${DATABASE_PORT:-3306}"
+
+# Runs a MariaDB client tool, the command and its arguments being the function's own, with the
+# connection settings added. The password reaches the tool through its environment, never its
+# arguments, which any process in the container can read, and the subshell keeps it out of the
+# environment of rclone and everything else the job starts.
+#
+# --skip-ssl-verify-server-cert makes the client fall back to an unencrypted connection when the
+# server has no TLS, whatever --ssl says, so `required` is enforced by the probe below and not by
+# these options.
+run_client_tool() {
+  (
+    TOOL="$1"
+    shift
+
+    export MYSQL_PWD="${DATABASE_PASSWORD}"
+
+    case "${DATABASE_TLS}" in
+      disabled) set -- --skip-ssl "$@" ;;
+      required) set -- --ssl --skip-ssl-verify-server-cert "$@" ;;
+      verify)
+        set -- --ssl --ssl-verify-server-cert "$@"
+        [ -z "${DATABASE_TLS_CA_PATH:-}" ] || set -- "--ssl-ca=${DATABASE_TLS_CA_PATH}" "$@"
+        ;;
+    esac
+
+    exec "${TOOL}" --host="${DATABASE_HOST}" --port="${SERVER_PORT}" --user="${DATABASE_USER}" "$@"
+  )
+}
+
+# mariadb-dump has no connect timeout option, so without a probe an unreachable host would hang the
+# run until the operating system gave up on the connection, two minutes or more. The mariadb client
+# does have one, and the probe also reports whether the connection is encrypted.
+CONNECTION_STATUS="$(run_client_tool mariadb --connect-timeout=10 --batch --skip-column-names --execute="SHOW SESSION STATUS LIKE 'Ssl_cipher'")" \
+  || fatal "failed to connect to ${DATABASE_HOST}:${SERVER_PORT} as '${DATABASE_USER}'"
+
+if [ "${DATABASE_TLS}" != disabled ] && [ -z "$(printf '%s\n' "${CONNECTION_STATUS}" | cut -f 2)" ]
+then
+  fatal "'DATABASE_TLS' is '${DATABASE_TLS}' but the connection to ${DATABASE_HOST}:${SERVER_PORT} isn't encrypted; the server may not support TLS"
+fi
+
+DUMP_PATH="${STAGING_DIRECTORY}/dump.sql.zst"
+DUMP_STDERR_PATH="${STAGING_DIRECTORY}/dump.stderr"
+
+# The dump is staged and checked before it is uploaded, never streamed into rclone, which would
+# store a truncated dump as the newest version if the tool died part-way. --dump-history keeps the
+# rows of system-versioned tables' history, which a dump drops without it.
+info "dumping ${DATABASE_NAME} from ${DATABASE_HOST}:${SERVER_PORT}"
+DUMP_FAILED=false
+run_client_tool mariadb-dump --single-transaction --quick --routines --events --triggers --no-tablespaces \
+  --skip-dump-date --default-character-set=utf8mb4 --dump-history "${DATABASE_NAME}" 2> "${DUMP_STDERR_PATH}" \
+  | zstd -q -o "${DUMP_PATH}" \
+  || DUMP_FAILED=true
+
+# The client can print an error and still exit 0, so its error lines fail the run whatever its status.
+fail_on_error_lines "${DUMP_STDERR_PATH}" mariadb-dump
+[ "${DUMP_FAILED}" = false ] || fatal "failed to dump ${DATABASE_NAME}"
+
+zstd -q --test "${DUMP_PATH}" || fatal "the dump of ${DATABASE_NAME} can't be read back"
+
+upload_staged_file "${DUMP_PATH}" "${DATABASE_NAME}.sql.zst"
+
+info "backup complete: ${DATABASE_NAME} -> ${BACKUP_TARGET}"
