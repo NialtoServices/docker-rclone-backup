@@ -556,7 +556,7 @@ GitHub disables the weekly rebuild after 60 days without repository activity. To
 1. Create the repository on GitHub and push.
 2. Create the labels `major`, `minor`, `patch` and `ci`.
 3. Install the Renovate GitHub app on the repository.
-4. Protect `main` with branch protection, and require the `CI` checks, so that Renovate merges nothing that has not passed them. Also enable "Allow auto-merge" in the repository settings: Renovate then asks GitHub to merge each automerge pull request as soon as the checks pass. Without it, Renovate skips that request and merges the pull request itself on a later run, so the setting is a speed-up and not a requirement.
+4. Protect `main` with branch protection, and require the one check named `CI passed` (the `ci-ok` job in `ci.yml`), so that Renovate merges nothing that has not passed CI. It fails unless the lint and every image build and test succeeded, and it fails when they are skipped or cancelled, so you never need to list the individual jobs, whose names change with the images and platforms. Also enable "Allow auto-merge" in the repository settings: Renovate then asks GitHub to merge each automerge pull request as soon as the checks pass. Without it, Renovate skips that request and merges the pull request itself on a later run, so the setting is a speed-up and not a requirement.
 5. Optionally add the `REBUILD_MONITOR_URL` secret.
 6. Publish the first release yourself, from the draft Release Drafter creates on the first push to `main`.
 
