@@ -26,6 +26,7 @@ refuse_unknown_settings DATABASE_HOST DATABASE_PORT DATABASE_USER DATABASE_PASSW
 require_settings DATABASE_HOST DATABASE_USER DATABASE_NAME BACKUP_TARGET
 require_location BACKUP_TARGET
 require_object_name DATABASE_NAME
+require_database_port
 load_database_password
 require_database_tls
 
@@ -37,33 +38,42 @@ fi
 acquire_run_lock
 open_staging_directory
 
-# The password and every other connection detail reach the tools through their environment, never
-# their arguments, which any process in the container can read.
-export PGHOST="${DATABASE_HOST}"
-export PGPORT="${DATABASE_PORT:-5432}"
-export PGUSER="${DATABASE_USER}"
-export PGPASSWORD="${DATABASE_PASSWORD}"
-export PGDATABASE="${DATABASE_NAME}"
-export PGCONNECT_TIMEOUT=10
+SERVER_PORT="${DATABASE_PORT:-5432}"
 
-case "${DATABASE_TLS}" in
-  disabled) export PGSSLMODE=disable ;;
-  required) export PGSSLMODE=require ;;
-  verify)
-    export PGSSLMODE=verify-full
+# Runs a command with the connection details in its environment. The password and every other detail
+# reach the tools this way, never their arguments, which any process in the container can read, and
+# the subshell keeps them out of the environment of rclone and everything else the job starts.
+with_connection_environment() {
+  (
+    export PGHOST="${DATABASE_HOST}"
+    export PGPORT="${SERVER_PORT}"
+    export PGUSER="${DATABASE_USER}"
+    export PGPASSWORD="${DATABASE_PASSWORD}"
+    export PGDATABASE="${DATABASE_NAME}"
+    export PGCONNECT_TIMEOUT=10
 
-    # `system` makes libpq trust the operating system's CA certificates; without it libpq looks for a
-    # root certificate in a home directory this image doesn't have.
-    export PGSSLROOTCERT="${DATABASE_TLS_CA_PATH:-system}"
-    ;;
-esac
+    case "${DATABASE_TLS}" in
+      disabled) export PGSSLMODE=disable ;;
+      required) export PGSSLMODE=require ;;
+      verify)
+        export PGSSLMODE=verify-full
+
+        # `system` makes libpq trust the operating system's CA certificates; without it libpq looks for
+        # a root certificate in a home directory this image doesn't have.
+        export PGSSLROOTCERT="${DATABASE_TLS_CA_PATH:-system}"
+        ;;
+    esac
+
+    exec "$@"
+  )
+}
 
 # Any major's psql can read the version of any server, so the newest does it.
-SERVER_VERSION_NUMBER="$("${POSTGRES_BIN_DIRECTORY}/18/bin/psql" -XAtc 'SHOW server_version_num')" \
-  || fatal "failed to connect to ${DATABASE_HOST}:${PGPORT} as '${DATABASE_USER}' to read the server's version"
+SERVER_VERSION_NUMBER="$(with_connection_environment "${POSTGRES_BIN_DIRECTORY}/18/bin/psql" -XAtc 'SHOW server_version_num')" \
+  || fatal "failed to connect to ${DATABASE_HOST}:${SERVER_PORT} as '${DATABASE_USER}' to read the server's version"
 
 case "${SERVER_VERSION_NUMBER}" in
-  "" | *[!0-9]*) fatal "the server at ${DATABASE_HOST}:${PGPORT} reported a version I can't read: '${SERVER_VERSION_NUMBER}'" ;;
+  "" | *[!0-9]*) fatal "the server at ${DATABASE_HOST}:${SERVER_PORT} reported a version I can't read: '${SERVER_VERSION_NUMBER}'" ;;
 esac
 
 SERVER_MAJOR=$((SERVER_VERSION_NUMBER / 10000))
@@ -78,8 +88,8 @@ DUMP_PATH="${STAGING_DIRECTORY}/dump.custom"
 # holding an exclusive lock. A minute outlasts the short exclusive locks of normal traffic, while a
 # migration or transaction stuck for longer fails the run, and so alerts the monitor, instead of the
 # dump waiting for it until the next scheduled run.
-info "dumping ${DATABASE_NAME} from PostgreSQL ${SERVER_MAJOR} at ${DATABASE_HOST}:${PGPORT}"
-"${CLIENT_BIN_DIRECTORY}/pg_dump" --format=custom --lock-wait-timeout=60s --file="${DUMP_PATH}" \
+info "dumping ${DATABASE_NAME} from PostgreSQL ${SERVER_MAJOR} at ${DATABASE_HOST}:${SERVER_PORT}"
+with_connection_environment "${CLIENT_BIN_DIRECTORY}/pg_dump" --format=custom --lock-wait-timeout=60s --file="${DUMP_PATH}" \
   || fatal "failed to dump ${DATABASE_NAME}"
 
 "${CLIENT_BIN_DIRECTORY}/pg_restore" --list "${DUMP_PATH}" > /dev/null \

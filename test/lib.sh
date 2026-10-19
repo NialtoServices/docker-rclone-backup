@@ -122,6 +122,20 @@ monitor_has_request() {
   monitor_requests | grep -q -- "$1"
 }
 
+# Writes an executable script at PATH that appends its own environment, which is the environment
+# rclone would inherit, to /tmp/rclone-environment and then runs the real rclone. Mounting it at
+# /usr/local/sbin/rclone puts it ahead of the real binary on the image's PATH, so the job's every
+# rclone call goes through it.
+write_rclone_environment_recorder() {
+  cat > "$1" <<'RECORDER'
+#!/bin/sh
+env >> /tmp/rclone-environment
+exec /usr/local/bin/rclone "$@"
+RECORDER
+
+  chmod 0755 "$1"
+}
+
 # Wraps a check function so the output saved in LOG_FILE is shown when it fails.
 with_log() {
   "$@" && return 0

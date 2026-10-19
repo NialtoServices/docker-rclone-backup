@@ -166,17 +166,17 @@ The `postgres` image dumps one PostgreSQL database with `pg_dump --format=custom
 | Variable | Description |
 |---|---|
 | `DATABASE_HOST` | The server's host name or address |
-| `DATABASE_PORT` | The server's port. Defaults to `5432` |
+| `DATABASE_PORT` | The server's port, a positive integer. Defaults to `5432` |
 | `DATABASE_USER` | The role to connect as; see [the backup role](#the-backup-role) |
 | `DATABASE_PASSWORD` | The role's password. Set this or `DATABASE_PASSWORD_FILE`, not both |
-| `DATABASE_PASSWORD_FILE` | The path of a file holding the password, such as a Docker or Compose secret, so it needn't sit in the container's environment. A trailing newline is ignored |
+| `DATABASE_PASSWORD_FILE` | The path of a file holding the password, such as a Docker or Compose secret, so it needn't sit in the container's environment. A trailing newline, or a carriage return before it, is ignored |
 | `DATABASE_NAME` | The database to dump. It becomes the object's name, so it must not contain `/` or start with `.` |
 | `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate; `verify` also checks that the certificate is trusted and names the host. Set `required` or `verify` for a managed database or any server across an untrusted network |
-| `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
+| `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA; it must be a readable file. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
 | `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
 | `BACKUP_STAGING_PATH` | Where the dump is written before it is uploaded. Defaults to `/tmp`, which is held in memory under the settings below, so a dump larger than the `/tmp` tmpfs fails the run, uploads nothing and leaves nothing behind; a volume here avoids that. The staged file is deleted after every run |
 
-Passwords with any characters work, and the password reaches `pg_dump` through its environment, never its arguments.
+Passwords with any characters work, and the password reaches `pg_dump` through its environment, never its arguments. Neither it nor any other connection detail is passed on to rclone.
 
 - **Versioning is the history.** Each upload replaces the object at the target, so keep older dumps by pointing the target at a bucket with versioning enabled, and set lifecycle rules there. Rules such as B2's "keep only the last version" make old versions vanish within a day.
 - **Every run adds a version.** A custom-format archive records when it was created, so two dumps of an unchanged database differ and the checksum comparison never finds a match.

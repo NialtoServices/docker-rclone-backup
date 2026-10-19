@@ -284,6 +284,40 @@ password_file_works() {
     && restore_dump
 }
 
+password_file_with_windows_line_ending_works() {
+  prepare
+  printf '%s\r\n' "${BACKUP_ROLE_PASSWORD}" > "${SECRETS_DIR}/password"
+
+  run_container -e DATABASE_PASSWORD_FILE=/secrets/password "${IMAGE}" /usr/local/bin/backup > "${LOG_FILE}" 2>&1 \
+    && restore_dump
+}
+
+# Runs the job with rclone replaced by a recorder of its environment, and checks that nothing from
+# the connection reached it: not the password and no PG variable. The password goes to the checking
+# script as an argument, so it never joins the script's own environment.
+rclone_environment_holds_no_connection_secret() {
+  write_rclone_environment_recorder "${WORK_DIR}/rclone-recorder"
+
+  for PASSWORD_SETTING in DATABASE_PASSWORD_FILE=/secrets/password "DATABASE_PASSWORD=${BACKUP_ROLE_PASSWORD}"
+  do
+    prepare
+    printf '%s\n' "${BACKUP_ROLE_PASSWORD}" > "${SECRETS_DIR}/password"
+
+    run_container -v "${WORK_DIR}/rclone-recorder:/usr/local/sbin/rclone:ro" -e "${PASSWORD_SETTING}" \
+      "${IMAGE}" sh -c '
+        /usr/local/bin/backup
+        status=$?
+
+        [ -s /tmp/rclone-environment ] || echo RCLONE_WAS_NEVER_RUN
+        grep -aq "^PG" /tmp/rclone-environment && echo A_PG_VARIABLE_REACHED_RCLONE
+        grep -aqF -e "$1" /tmp/rclone-environment && echo THE_PASSWORD_REACHED_RCLONE
+        exit "${status}"
+      ' sh "${BACKUP_ROLE_PASSWORD}" > "${LOG_FILE}" 2>&1 \
+      && ! grep -q -e RCLONE_WAS_NEVER_RUN -e A_PG_VARIABLE_REACHED_RCLONE -e THE_PASSWORD_REACHED_RCLONE "${LOG_FILE}" \
+      || return 1
+  done
+}
+
 both_password_forms_are_refused() {
   prepare
   printf '%s\n' "${BACKUP_ROLE_PASSWORD}" > "${SECRETS_DIR}/password"
@@ -400,6 +434,7 @@ dump_larger_than_the_staging_space_fails_cleanly() {
 check_accepts_valid_settings_silently() {
   prepare
   JOB_ARGUMENT="--check"
+  : > "${SECRETS_DIR}/ca.crt"
 
   run_job -e DATABASE_TLS=verify -e DATABASE_TLS_CA_PATH=/secrets/ca.crt -e DATABASE_PORT=5432 \
     && [ ! -s "${LOG_FILE}" ] \
@@ -414,6 +449,26 @@ check_rejects_bad_tls_settings() {
     && grep -q "sometimes" "${LOG_FILE}" \
     && ! run_job -e DATABASE_TLS_CA_PATH=/secrets/ca.crt \
     && grep -q "DATABASE_TLS_CA_PATH" "${LOG_FILE}"
+}
+
+check_rejects_a_bad_port() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  for PORT in abc 0 -1 54.32
+  do
+    ! run_job -e "DATABASE_PORT=${PORT}" \
+      && grep -q "DATABASE_PORT" "${LOG_FILE}" \
+      || return 1
+  done
+}
+
+check_rejects_a_missing_ca_file() {
+  prepare
+  JOB_ARGUMENT="--check"
+
+  ! run_job -e DATABASE_TLS=verify -e DATABASE_TLS_CA_PATH=/secrets/missing.crt \
+    && grep -q "/secrets/missing.crt" "${LOG_FILE}"
 }
 
 an_unknown_database_setting_is_refused() {
@@ -440,6 +495,8 @@ done
 
 check "a password with shell characters works and appears in no process arguments" with_log password_with_shell_characters_works_and_stays_out_of_arguments
 check "DATABASE_PASSWORD_FILE works" with_log password_file_works
+check "a DATABASE_PASSWORD_FILE with a Windows line ending works" with_log password_file_with_windows_line_ending_works
+check "rclone's environment holds no password and no PG variable, whichever way the password is given" with_log rclone_environment_holds_no_connection_secret
 check "setting both password forms is refused" with_log both_password_forms_are_refused
 check "an unreadable DATABASE_PASSWORD_FILE is refused" with_log unreadable_password_file_is_refused
 check "a missing password is refused" with_log missing_password_is_refused
@@ -450,6 +507,8 @@ check "DATABASE_TLS=required and verify work against a server with TLS, and veri
 check "a dump larger than the staging space fails, uploads nothing and leaves no staged file" with_log dump_larger_than_the_staging_space_fails_cleanly
 check "--check accepts valid settings without connecting or printing" with_log check_accepts_valid_settings_silently
 check "--check rejects an unknown DATABASE_TLS value and a CA path without verify" with_log check_rejects_bad_tls_settings
+check "--check rejects a DATABASE_PORT that isn't a positive integer" with_log check_rejects_a_bad_port
+check "--check rejects a DATABASE_TLS_CA_PATH that isn't a readable file" with_log check_rejects_a_missing_ca_file
 check "an unknown DATABASE_ setting is refused" with_log an_unknown_database_setting_is_refused
 
 stop_server

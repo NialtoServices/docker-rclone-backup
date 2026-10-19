@@ -53,7 +53,11 @@ refuse_unknown_settings() {
 
 # Exactly one of DATABASE_PASSWORD and DATABASE_PASSWORD_FILE must be set. A file is read here, so a
 # missing or unreadable secret stops the container at start-up, and its contents replace
-# DATABASE_PASSWORD. Command substitution drops the trailing newline that editors and `echo` leave.
+# DATABASE_PASSWORD. Command substitution drops the trailing newline that editors and `echo` leave, and
+# a carriage return left by a file saved with Windows line endings is dropped too.
+#
+# The password ends up an ordinary shell variable even when the container's environment supplied it:
+# rclone and every other child inherit exported variables, and only the dump tools may see the secret.
 load_database_password() {
   if [ -n "${DATABASE_PASSWORD:-}" ] && [ -n "${DATABASE_PASSWORD_FILE:-}" ]
   then
@@ -67,16 +71,29 @@ load_database_password() {
 
     DATABASE_PASSWORD="$(cat "${DATABASE_PASSWORD_FILE}")" \
       || fatal "failed to read '${DATABASE_PASSWORD_FILE}'"
+    DATABASE_PASSWORD="${DATABASE_PASSWORD%"$(printf '\r')"}"
     [ -n "${DATABASE_PASSWORD}" ] || fatal "'DATABASE_PASSWORD_FILE' is empty: '${DATABASE_PASSWORD_FILE}'"
-
-    return 0
   fi
 
   [ -n "${DATABASE_PASSWORD:-}" ] || fatal "set one of 'DATABASE_PASSWORD' and 'DATABASE_PASSWORD_FILE'"
+
+  PASSWORD_TO_KEEP="${DATABASE_PASSWORD}"
+  unset DATABASE_PASSWORD
+  DATABASE_PASSWORD="${PASSWORD_TO_KEEP}"
+  unset PASSWORD_TO_KEEP
+}
+
+# DATABASE_PORT is optional, so an empty value counts as unset. A set one must be a positive integer.
+require_database_port() {
+  case "${DATABASE_PORT:-}" in
+    "") ;;
+    *[!0-9]* | 0*) fatal "'DATABASE_PORT' must be a positive integer, not '${DATABASE_PORT}'" ;;
+  esac
 }
 
 # DATABASE_TLS defaults to disabled. A CA file only means something when the server's certificate is
-# verified, so naming one under another mode is a mistake worth stopping for.
+# verified, so naming one under another mode is a mistake worth stopping for, and naming one the
+# container can't read would otherwise fail every run with the client's own message.
 require_database_tls() {
   DATABASE_TLS="${DATABASE_TLS:-disabled}"
 
@@ -88,5 +105,11 @@ require_database_tls() {
   if [ -n "${DATABASE_TLS_CA_PATH:-}" ] && [ "${DATABASE_TLS}" != "verify" ]
   then
     fatal "'DATABASE_TLS_CA_PATH' is only used when 'DATABASE_TLS' is 'verify', not '${DATABASE_TLS}'"
+  fi
+
+  if [ -n "${DATABASE_TLS_CA_PATH:-}" ]
+  then
+    [ -f "${DATABASE_TLS_CA_PATH}" ] && [ -r "${DATABASE_TLS_CA_PATH}" ] \
+      || fatal "'DATABASE_TLS_CA_PATH' is not a readable file: '${DATABASE_TLS_CA_PATH}'"
   fi
 }
