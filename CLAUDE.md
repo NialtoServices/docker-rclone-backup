@@ -87,9 +87,11 @@ file reads as ground truth and so misleads the moment it drifts.
   close together can leave the earlier without images (a cancelled Publish run in the Actions tab).
   Auto release's dispatch step failing after it publishes does the same. Re-run it with
   `gh workflow run publish.yml --ref <tag>`; the weekly rebuild only ever builds the newest release.
-- **GitHub disables the weekly rebuild after 60 days without repository activity.** The
-  `REBUILD_MONITOR_URL` secret's heartbeat is the alert; re-enable it with
-  `gh workflow enable publish.yml`.
+- **GitHub disables the weekly rebuild after 60 days without repository activity.** Renovate's
+  automerged updates keep the repository active, and a failed scheduled run emails whoever last
+  changed the schedule, so the optional `REBUILD_MONITOR_URL` heartbeat isn't set. If Renovate stops
+  merging, the schedule can lapse unnoticed: re-enable it with `gh workflow enable publish.yml`, or
+  set the secret to a weekly check's success URL to be alerted.
 - **Branch protection requires the one check named `CI passed`** (the `ci-ok` job in `ci.yml`).
   Renaming it leaves every pull request, Renovate's included, waiting on a check that never reports.
 - **A new image's GHCR package starts private.** A package that a workflow creates with
