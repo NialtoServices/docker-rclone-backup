@@ -9,7 +9,7 @@ Each image is `ghcr.io/nialtoservices/rclone-backup/<image>`, and does one thing
 | [`files`](#files) | One directory, or one rclone remote path, with `rclone sync` | A mirror of the source |
 | [`sqlite`](#sqlite) | One SQLite database file, snapshotted while the application runs | `<file name>.zst` |
 | [`postgres`](#postgresql) | One PostgreSQL database, servers 15 to 18 | `<database>.dump` |
-| [`mariadb`](#mariadb) | One MariaDB database, servers 10.11, 11.4, 11.8 and later | `<database>.sql.zst` |
+| [`mariadb`](#mariadb) | One MariaDB database, servers 10.11, 11.4, 11.8 and 12.3 | `<database>.sql.zst` |
 | [`mysql`](#mysql) | One MySQL database, servers 8.0, 8.4 and 9.x | `<database>.sql.zst` |
 
 Every run writes its backup to the target under that fixed name, replacing the object from the run before, except `files`, which mirrors the source. The images keep no history of their own; to back up more than one database, file or folder, run more than one container.
@@ -339,7 +339,7 @@ Add `--no-owner` if the roles that owned the objects don't exist on the server y
 
 ## MariaDB
 
-The `mariadb` image dumps one MariaDB database with `mariadb-dump`, compresses it with zstd and uploads it to the target as `<database>.sql.zst` (`app.sql.zst` for a database called `app`). Servers 10.11, 11.4, 11.8 and later are supported, all by the one client the image carries, MariaDB 11.8's. The compressed dump is checked with `zstd --test` before it is uploaded, and a dump that fails the check, or whose client printed an error, is not uploaded.
+The `mariadb` image dumps one MariaDB database with `mariadb-dump`, compresses it with zstd and uploads it to the target as `<database>.sql.zst` (`app.sql.zst` for a database called `app`). The long-term support releases 10.11, 11.4, 11.8 and 12.3 are supported and tested, all by the one client the image carries, MariaDB 11.8's. Short-term releases between them use the same client but aren't tested. The compressed dump is checked with `zstd --test` before it is uploaded, and a dump that fails the check, or whose client printed an error, is not uploaded.
 
 | Variable | Description |
 |---|---|
