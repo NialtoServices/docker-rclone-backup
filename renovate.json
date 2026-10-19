@@ -57,8 +57,10 @@
       "automerge": true
     },
     {
+      "description": "A replacement is a different package, so it waits for review like a minor",
       "matchUpdateTypes": [
-        "minor"
+        "minor",
+        "replacement"
       ],
       "labels": [
         "minor"
@@ -83,6 +85,13 @@
       "labels": [
         "ci"
       ]
+    },
+    {
+      "description": "A test server line gets its own branch and pull request, so that the Dockerfile's update of the same image keeps its patch label and stays in the release notes",
+      "matchFileNames": [
+        "test/servers"
+      ],
+      "additionalBranchPrefix": "test-servers-"
     },
     {
       "description": "supercronic publishes no checksums, so its per-architecture SHA-256 ARGs are edited by hand",

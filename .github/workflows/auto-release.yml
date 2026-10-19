@@ -70,18 +70,23 @@ jobs:
           fi
 
           # Each commit becomes one line per merged pull request that contains it, or "direct -"
-          # when it has none. A failed API call fails the step, which can never print "publish".
-          CHANGES="$(
-            gh api "repos/${GH_REPO}/compare/${LAST_TAG}...${HEAD_SHA}" --paginate --jq '.commits[].sha' \
-              | while read -r SHA
-                do
-                  gh api "repos/${GH_REPO}/commits/${SHA}/pulls" --jq '
-                    [.[] | select(.merged_at != null)]
-                    | if length == 0 then "direct -"
-                      else .[] | "\(.user.login) \(if (.labels | length) == 0 then "-" else ([.labels[].name] | join(",")) end)"
-                      end'
-                done
-          )"
+          # when it has none. Bash ignores errexit inside a command substitution's pipeline, so the
+          # lookups run in this shell instead: a failed one stops the step, and a commit's line
+          # can never be silently dropped.
+          COMMIT_SHAS="$(gh api "repos/${GH_REPO}/compare/${LAST_TAG}...${HEAD_SHA}" --paginate --jq '.commits[].sha')"
+          CHANGES=""
+
+          for SHA in ${COMMIT_SHAS}
+          do
+            PULL_LINES="$(
+              gh api "repos/${GH_REPO}/commits/${SHA}/pulls" --jq '
+                [.[] | select(.merged_at != null)]
+                | if length == 0 then "direct -"
+                  else .[] | "\(.user.login) \(if (.labels | length) == 0 then "-" else ([.labels[].name] | join(",")) end)"
+                  end'
+            )"
+            CHANGES="${CHANGES}${PULL_LINES}"$'\n'
+          done
 
           echo "Changes since ${LAST_TAG}:"
           echo "${CHANGES}"

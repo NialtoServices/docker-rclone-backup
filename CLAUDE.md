@@ -31,8 +31,8 @@ file reads as ground truth and so misleads the moment it drifts.
   under a patch number. See the CI section of the design spec in `docs/superpowers/specs/`.
 - **`renovate.json` keeps `ci` pull requests free of the `patch` label.** The update-type rules set
   `labels` and the later CI rule replaces it; changing either to `addLabels` would give an Actions
-  or test-server patch `patch,ci`, which the auto-release decision publishes. A pull request that
-  changes both the Dockerfile and `test/servers` (the `mysql:9.7` digest) carries both labels on
-  purpose, because it does change an image.
+  or test-server patch `patch,ci`, which the auto-release decision publishes and Release Drafter
+  leaves out of the notes. Test-server lines get their own branch prefix so that the Dockerfile's
+  update of the same image (`mysql:9.7`) is a separate pull request that keeps `patch`.
 - **`config:recommended` ignores `test/`**, so `renovate.json` removes `:ignoreModulesAndTests`;
   without that `test/servers` is never read and Renovate reports nothing wrong.
