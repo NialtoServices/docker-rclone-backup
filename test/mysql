@@ -505,6 +505,18 @@ tls_required_and_verify_work_against_a_server_with_tls() {
     && target_is_empty
 }
 
+# The Oracle client refuses VERIFY_IDENTITY without a CA file, so the image passes its own bundle. A
+# self-signed server is not in that bundle, so the run has to fail on the certificate, not on a missing
+# CA.
+verify_without_a_ca_path_checks_against_the_image_bundle() {
+  prepare
+
+  ! run_job -e "DATABASE_HOST=${TLS_SERVER_NAME}" -e DATABASE_TLS=verify \
+    && grep -qi "certificate verify failed" "${LOG_FILE}" \
+    && ! grep -qi "CA certificate is required" "${LOG_FILE}" \
+    && target_is_empty
+}
+
 # Everything the job leaves in /tmp besides its lock and rclone's cache is staged data. The check runs
 # inside the container, since the tmpfs goes with it.
 dump_larger_than_the_staging_space_fails_cleanly() {
@@ -669,6 +681,7 @@ check "a database name containing '/' or starting with '.' or '-' is refused at 
 check "an unreachable host fails within 60 s and uploads nothing" with_log unreachable_host_fails_within_a_minute
 check "MYSQL_ variables from the server's own env file are ignored" with_log shared_server_variables_are_ignored
 check "DATABASE_TLS=required and verify work against a server with TLS, and verify rejects an unknown CA" with_log tls_required_and_verify_work_against_a_server_with_tls
+check "DATABASE_TLS=verify without a CA path verifies against the image's bundle and rejects a self-signed server" with_log verify_without_a_ca_path_checks_against_the_image_bundle
 check "a dump larger than the staging space fails, uploads nothing and leaves no staged file" with_log dump_larger_than_the_staging_space_fails_cleanly
 check "--check accepts valid settings without connecting or printing" with_log check_accepts_valid_settings_silently
 check "--check rejects an unknown DATABASE_TLS value and a CA path without verify" with_log check_rejects_bad_tls_settings

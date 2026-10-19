@@ -60,8 +60,9 @@ run_client_tool() {
       disabled) set -- --ssl-mode=DISABLED --get-server-public-key "$@" ;;
       required) set -- --ssl-mode=REQUIRED "$@" ;;
       verify)
-        set -- --ssl-mode=VERIFY_IDENTITY "$@"
-        [ -z "${DATABASE_TLS_CA_PATH:-}" ] || set -- "--ssl-ca=${DATABASE_TLS_CA_PATH}" "$@"
+        # The client refuses VERIFY_IDENTITY without a CA file, so the image's own bundle stands in
+        # when no CA is given.
+        set -- --ssl-mode=VERIFY_IDENTITY "--ssl-ca=${DATABASE_TLS_CA_PATH:-/etc/ssl/certs/ca-certificates.crt}" "$@"
         ;;
     esac
 
