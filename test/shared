@@ -369,7 +369,7 @@ rclone_config_names_a_mounted_config_file() {
 }
 
 settings_helpers_refuse_bad_object_names() {
-  for OBJECT_NAME in 'a/b' '.hidden' '../escape' '/absolute'
+  for OBJECT_NAME in 'a/b' '.hidden' '../escape' '/absolute' '-hyphen' '--help'
   do
     if hardened_run -e "OBJECT_NAME=${OBJECT_NAME}" "${IMAGE}" sh -c '
       . /usr/local/lib/rclone-backup/log.sh
@@ -404,6 +404,6 @@ check "docker stop lets a scheduled backup clean up, report its failure and exit
 check "a stopped run reports the output it wrote while stopping" with_log stopped_run_reports_the_output_it_wrote_while_stopping
 check "a stop signal before the run starts prevents the run" with_log stop_before_the_run_starts_prevents_the_run
 check "a monitor URL never appears in process arguments" with_log monitor_url_stays_out_of_process_arguments
-check "an object name with a slash or a leading dot is refused" with_log settings_helpers_refuse_bad_object_names
+check "an object name with a slash, a leading dot or a leading hyphen is refused" with_log settings_helpers_refuse_bad_object_names
 check "rclone is quiet about a missing config file" with_log rclone_is_quiet_about_a_missing_config_file
 check "RCLONE_CONFIG still names a mounted config file" with_log rclone_config_names_a_mounted_config_file

@@ -170,7 +170,7 @@ The `postgres` image dumps one PostgreSQL database with `pg_dump --format=custom
 | `DATABASE_USER` | The role to connect as; see [the backup role](#the-backup-role) |
 | `DATABASE_PASSWORD` | The role's password. Set this or `DATABASE_PASSWORD_FILE`, not both |
 | `DATABASE_PASSWORD_FILE` | The path of a file holding the password, such as a Docker or Compose secret, so it needn't sit in the container's environment. A trailing newline, or a carriage return before it, is ignored |
-| `DATABASE_NAME` | The database to dump. It becomes the object's name, so it must not contain `/` or start with `.` |
+| `DATABASE_NAME` | The database to dump. It becomes the object's name, so it must not contain `/` or start with `.` or `-` |
 | `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate; `verify` also checks that the certificate is trusted and names the host. Set `required` or `verify` for a managed database or any server across an untrusted network |
 | `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA; it must be a readable file. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
 | `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |
@@ -245,7 +245,7 @@ The `mariadb` image dumps one MariaDB database with `mariadb-dump`, compresses i
 | `DATABASE_USER` | The account to connect as; see [the backup account](#the-backup-account) |
 | `DATABASE_PASSWORD` | The account's password. Set this or `DATABASE_PASSWORD_FILE`, not both |
 | `DATABASE_PASSWORD_FILE` | The path of a file holding the password, such as a Docker or Compose secret, so it needn't sit in the container's environment. A trailing newline, or a carriage return before it, is ignored |
-| `DATABASE_NAME` | The database to dump. It becomes the object's name, so it must not contain `/` or start with `.` |
+| `DATABASE_NAME` | The database to dump. It becomes the object's name, so it must not contain `/` or start with `.` or `-` |
 | `DATABASE_TLS` | `disabled` (the default), `required` or `verify`. `required` encrypts the connection without checking the server's certificate, and the run fails if the connection turns out not to be encrypted; `verify` also checks the certificate. Set `required` or `verify` for a managed database or any server across an untrusted network |
 | `DATABASE_TLS_CA_PATH` | With `verify`, the path of the certificate authority file to trust, for a private CA; it must be a readable file. Without it the operating system's CA certificates are used. Refused with any other `DATABASE_TLS` value |
 | `BACKUP_TARGET` | Where to upload the dump: an rclone remote and path (`b2:my-bucket/app`), or an absolute path inside the container |

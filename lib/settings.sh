@@ -22,12 +22,13 @@ require_location() {
 }
 
 # The name becomes the last segment of the uploaded object's path, so a slash would write somewhere
-# other than BACKUP_TARGET and a leading dot would write a hidden object.
+# other than BACKUP_TARGET and a leading dot would write a hidden object. It is also passed to the
+# dump tool as an argument, where a leading hyphen would be read as an option.
 require_object_name() {
   eval "SETTING_VALUE=\${${1}:-}"
 
   case "${SETTING_VALUE}" in
-    */* | .*) fatal "'${1}' must not contain '/' or start with '.', not '${SETTING_VALUE}'" ;;
+    */* | .* | -*) fatal "'${1}' must not contain '/' or start with '.' or '-', not '${SETTING_VALUE}'" ;;
   esac
 }
 

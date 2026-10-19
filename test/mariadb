@@ -423,7 +423,9 @@ unsafe_database_names_are_refused() {
   ! run_job -e DATABASE_NAME=nested/app \
     && grep -q "nested/app" "${LOG_FILE}" \
     && ! run_job -e DATABASE_NAME=.hidden \
-    && grep -q "\.hidden" "${LOG_FILE}"
+    && grep -q "\.hidden" "${LOG_FILE}" \
+    && ! run_job -e DATABASE_NAME=--help \
+    && grep -q -e "--help" "${LOG_FILE}"
 }
 
 unreachable_host_fails_within_a_minute() {
@@ -593,7 +595,7 @@ check "rclone's environment holds no password and no MYSQL_PWD, whichever way th
 check "setting both password forms is refused" with_log both_password_forms_are_refused
 check "an unreadable DATABASE_PASSWORD_FILE is refused" with_log unreadable_password_file_is_refused
 check "a missing password is refused" with_log missing_password_is_refused
-check "a database name containing '/' or starting with '.' is refused at start" with_log unsafe_database_names_are_refused
+check "a database name containing '/' or starting with '.' or '-' is refused at start" with_log unsafe_database_names_are_refused
 check "an unreachable host fails within 60 s and uploads nothing" with_log unreachable_host_fails_within_a_minute
 check "MARIADB_ and MYSQL_ variables from the server's own env file are ignored" with_log shared_server_variables_are_ignored
 check "DATABASE_TLS=required and verify work against a server with TLS, and verify rejects an unknown CA" with_log tls_required_and_verify_work_against_a_server_with_tls

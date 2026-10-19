@@ -72,7 +72,8 @@ run_client_tool() {
 CONNECTION_STATUS="$(run_client_tool mariadb --connect-timeout=10 --batch --skip-column-names --execute="SHOW SESSION STATUS LIKE 'Ssl_cipher'")" \
   || fatal "failed to connect to ${DATABASE_HOST}:${SERVER_PORT} as '${DATABASE_USER}'"
 
-if [ "${DATABASE_TLS}" != disabled ] && [ -z "$(printf '%s\n' "${CONNECTION_STATUS}" | cut -f 2)" ]
+# cut -s drops a line with no tab, so a reply that isn't a name and a value counts as an empty cipher.
+if [ "${DATABASE_TLS}" != disabled ] && [ -z "$(printf '%s\n' "${CONNECTION_STATUS}" | cut -s -f 2)" ]
 then
   fatal "'DATABASE_TLS' is '${DATABASE_TLS}' but the connection to ${DATABASE_HOST}:${SERVER_PORT} isn't encrypted; the server may not support TLS"
 fi
