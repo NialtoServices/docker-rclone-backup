@@ -27,10 +27,13 @@ hardened_run() {
     "$@"
 }
 
-# Retries a command once a second for up to 30 seconds.
-wait_for() {
+# Retries a command once a second for up to the given number of seconds.
+wait_for_up_to() {
+  WAIT_SECONDS="$1"
+  shift
+
   ATTEMPT=1
-  while [ "${ATTEMPT}" -le 30 ]
+  while [ "${ATTEMPT}" -le "${WAIT_SECONDS}" ]
   do
     "$@" && return 0
 
@@ -39,6 +42,16 @@ wait_for() {
   done
 
   return 1
+}
+
+# Retries a command once a second for up to 30 seconds.
+wait_for() {
+  wait_for_up_to 30 "$@"
+}
+
+# Retries a command for up to 75 seconds, which covers the wait for a schedule's next minute.
+wait_for_next_minute() {
+  wait_for_up_to 75 "$@"
 }
 
 # Creates WORK_DIR, a temporary directory that any uid can write to, and LOG_FILE inside it, and

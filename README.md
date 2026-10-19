@@ -72,7 +72,7 @@ A key restricted to a single bucket can't create buckets, and rclone's check tha
 
 | Variable | Description |
 |---|---|
-| `BACKUP_SCHEDULE` | When to run: a five-field cron schedule (`0 3 * * *`), a macro such as `@daily` or `@hourly`, or `disabled` to keep the container running with nothing scheduled. Defaults to `0 0 * * *`. Seven-field schedules with seconds are accepted too; `@reboot` and `@every` are not |
+| `BACKUP_SCHEDULE` | When to run: a five-field cron schedule (`0 3 * * *`), a macro such as `@daily` or `@hourly`, or `disabled` to keep the container running with nothing scheduled. Defaults to `0 0 * * *`. `@reboot` and `@every` are not accepted, and neither are schedules with a seconds or year field |
 | `BACKUP_TARGET` | The rclone remote and path that receives the backup (`b2:my-bucket/app`), or an absolute path inside the container |
 | `BACKUP_STAGING_PATH` | The `sqlite` and database images only: where the dump or snapshot is written before it is uploaded. Defaults to `/tmp`; see each image for how to size it |
 | `TZ` | The time zone the schedule and the log timestamps follow, for example `Europe/London`. Defaults to UTC |

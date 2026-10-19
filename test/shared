@@ -100,7 +100,7 @@ start_stops_with_message() {
 }
 
 valid_schedules_keep_running() {
-  for SCHEDULE in '0 3 * * *' '@daily' '*/15 * * * *' '0 9,21 * * 1-5' '0 3 ? * *' "0${TAB}3 * * *"
+  for SCHEDULE in '0 3 * * *' '@daily' '*/15 * * * *' '0 9,21 * * 1-5' '0 3 ? * *' "0${TAB}3 * * *" ' @daily ' '0  3 * * *'
   do
     start_in_background -e "BACKUP_SCHEDULE=${SCHEDULE}" -e UNRELATED_SETTING=1
     sleep 2
@@ -119,8 +119,10 @@ valid_schedules_keep_running() {
 invalid_schedules_stop_the_container() {
   NEWLINE_SCHEDULE="$(printf '0 3 * * *\n* * * * *')"
 
-  # Everything after a macro would become part of the command, and supercronic has no @every.
-  for SCHEDULE in '"0 3 * * *"' '0 3 * *' '0 3 * * * # nightly' '@reboot' '@daily foo' '@every 5m' "@daily${TAB}3" "${NEWLINE_SCHEDULE}"
+  # supercronic reads the longest prefix that parses as a schedule and takes the rest as the command,
+  # so any value that isn't one macro or exactly five fields has to be refused here.
+  for SCHEDULE in '"0 3 * * *"' '0 3 * *' '0 3 * * * # nightly' '@reboot' '@daily foo' '@every 5m' "@daily${TAB}3" "${NEWLINE_SCHEDULE}" \
+    ' @daily foo' "${TAB}@daily foo" '0 3 * * * echo' '0 3 * * 1 5' '0 0 3 * * *' '@daily * * * *' '* * * * * * *'
   do
     if ! start_stops_with_message "BACKUP_SCHEDULE must be" -e "BACKUP_SCHEDULE=${SCHEDULE}"
     then
@@ -217,7 +219,7 @@ stop_during_a_scheduled_backup() {
 
   hardened_run_with_monitor --detach --name "${CONTAINER_NAME}" \
     -v "${TARGET_DIR}:/target" \
-    -e 'BACKUP_SCHEDULE=* * * * * * *' \
+    -e 'BACKUP_SCHEDULE=* * * * *' \
     -e BACKUP_SOURCE=/tmp/source \
     -e BACKUP_TARGET=/target \
     -e RCLONE_BWLIMIT=1M \
@@ -227,7 +229,7 @@ stop_during_a_scheduled_backup() {
     exec /usr/local/bin/start
   ' > /dev/null || return 1
 
-  wait_for target_has_partial_file || return 1
+  wait_for_next_minute target_has_partial_file || return 1
 
   # At 1 MB/s the 60 MB source outlasts the grace period, so only a signalled backup stops in time.
   # The container is removed as soon as it stops, so its exit code has to be collected by a wait
@@ -274,7 +276,7 @@ scheduled_run_reports_its_failure() {
   start_fake_monitor "${NETWORK_NAME}" || return 1
 
   hardened_run_with_monitor --detach --name "${CONTAINER_NAME}" \
-    -e 'BACKUP_SCHEDULE=* * * * * * *' \
+    -e 'BACKUP_SCHEDULE=* * * * *' \
     -e BACKUP_SOURCE=/tmp/source \
     -e BACKUP_TARGET=/tmp/target \
     -e RCLONE_MAX_DELETE=0 \
@@ -284,7 +286,7 @@ scheduled_run_reports_its_failure() {
     exec /usr/local/bin/start
   ' > /dev/null || return 1
 
-  wait_for monitor_has_request '^POST /fail ' \
+  wait_for_next_minute monitor_has_request '^POST /fail ' \
     && monitor_has_request '^GET /start ' \
     && docker exec "${CONTAINER_NAME}" test -e /tmp/target/stale
   SCHEDULED_STATUS=$?
