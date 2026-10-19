@@ -49,6 +49,37 @@ file reads as ground truth and so misleads the moment it drifts.
 - **`config:recommended` ignores `test/`**, so `renovate.json` removes `:ignoreModulesAndTests`;
   without that `test/servers` is never read and Renovate reports nothing wrong.
 
+## Periodic review
+
+The owner periodically starts a session and asks whether everything is up to date. Run every check
+below, then report what is current, what needs a change now, and what falls due in the next six
+months. Propose each change before making it, and make it by the matching Maintenance entry.
+
+1. **The automation is running.**
+   - `gh workflow list --all` and `gh run list --limit 30`: CI is green on `main`; Publish isn't
+     `disabled_inactivity`, and its scheduled run succeeded within the last eight days; every
+     published release (`gh release list`) has a successful Publish run.
+   - Renovate is alive: the Dependency Dashboard issue reports no errors or rate limits, and
+     Renovate pull requests have merged in the last month
+     (`gh pr list --state merged --author app/renovate`). If none have, ask the owner to check the
+     repository on developer.mend.io.
+   - No Renovate pull request is failing CI or stuck; a supercronic bump waits for its checksums.
+2. **Nothing is waiting to be released.** Commits on `main` since the newest published release that
+   change an image (anything outside `README.md`, `CLAUDE.md`, `test/` and `.github/`) need a
+   release; say which version the draft should become and why.
+3. **Pending approvals.** For each major on the dashboard, read its release notes against what the
+   workflows use and recommend taking it or not. `docker/metadata-action` and the artifact actions
+   run only when publishing, so after merging one, prove it with
+   `gh workflow run publish.yml --ref <newest tag>`.
+4. **Database and platform versions.** Compare https://endoflife.date (`postgresql`, `mysql`,
+   `mariadb`, `debian`) and each project's release notes with the Dockerfile, `test/servers` and the
+   `SERVER_VERSIONS` at the top of `test/postgres`, `test/mysql` and `test/mariadb`:
+   - PostgreSQL: a new major is out, or a supported one reaches end of life (each November).
+   - MySQL: a new LTS is out, so the client should move; a supported server is past end of life.
+   - MariaDB: a new LTS series isn't in `test/servers`; a tested series is past end of life.
+   - Debian: a new stable release is out, or trixie's end of life is approaching.
+5. **Signing keys.** A build failing at the rclone or PGDG verification step means a key rotation.
+
 ## Maintenance
 
 - **Label every pull request of your own `major`, `minor` or `patch` before merging it**, or `ci`
@@ -78,10 +109,25 @@ file reads as ground truth and so misleads the moment it drifts.
   `*_SIGNER_FINGERPRINT` ARGs). A key rotation fails the build until the new key is committed and
   its fingerprint checked against the one its publisher announces.
 - **Renovate moves only the digests of the Dockerfile's `mysql` image and the database lines in
-  `test/servers`**, so nothing prompts a version change for them. The MySQL client moves to the next
-  LTS by hand (never to an innovation release), and a new server series gets a `test/servers` line
-  and tests of its own; changing an existing line's version would replace a supported series rather
-  than add one. Watch for new LTS and series releases yourself.
+  `test/servers`**, so nothing prompts a version change for them; the periodic review finds them.
+  Changing an existing `test/servers` line's version would replace a supported series rather than
+  add one.
+- **Adding a MySQL or MariaDB server series** (a new LTS): add its line to `test/servers`, pinned by
+  the digest `docker buildx imagetools inspect <image>:<tag>` reports, add it to `SERVER_VERSIONS`
+  and `NEWEST_VERSION` at the top of `test/mysql` or `test/mariadb`, run that suite, and update the
+  README's version lists. It changes no image, so it needs no release.
+- **Moving the MySQL client to the next LTS**: change the Dockerfile's `mysql:<tag>@<digest>` stage,
+  add that series as a server too, run `test/mysql` (every supported server must still dump and
+  restore), update the README's "9.7" mentions, and release it as a minor, or as a major if any
+  supported server or account type stops working.
+- **Dropping an end-of-life MySQL or MariaDB series** is a major release: remove it from
+  `test/servers`, `SERVER_VERSIONS` and the README. The suites tie checks to the oldest servers'
+  behaviour: in `test/mariadb`, `OLDEST_VERSION` (10.11) is the server needing the `mysql.proc`
+  routine grant and the one with no TLS for the "required fails" check; in `test/mysql`,
+  `OLDEST_VERSION` (8.0) is started with TLS off and `NATIVE_PASSWORD_VERSION` (8.4) is the newest
+  server that still allows `mysql_native_password`. Moving those to the next series breaks the
+  checks, so rework each case (for example, start a server with TLS switched off explicitly) rather
+  than renaming the version.
 - **A release whose Publish run never built has no images.** Publish runs one at a time and GitHub
   keeps only one run pending, so a third run cancels the waiting one and two releases published
   close together can leave the earlier without images (a cancelled Publish run in the Actions tab).
