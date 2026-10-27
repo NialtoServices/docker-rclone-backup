@@ -85,7 +85,7 @@ FROM debian AS supercronic
 
 ARG TARGETARCH
 # renovate: datasource=github-releases depName=aptible/supercronic extractVersion=^v(?<version>.+)$
-ARG SUPERCRONIC_VERSION=0.2.50
+ARG SUPERCRONIC_VERSION=0.2.51
 ARG SUPERCRONIC_SHA256_AMD64=d2d7c97fbfefc763d5bbcbbb3f8d61f9dd3410ce5d05a737c414994b80b8cdd0
 ARG SUPERCRONIC_SHA256_ARM64=a1c0af9872e8de89a1ce5c1b596e26c42917d5a2cf914d98faee2e28156899e2
 
