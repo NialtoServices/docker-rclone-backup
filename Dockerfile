@@ -16,7 +16,7 @@
 
 # The base must be glibc-based, for the MySQL client copied from Oracle's image, and have PGDG
 # packages for every supported PostgreSQL major on one release. Debian has both.
-FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS debian
+FROM debian:trixie-slim@sha256:89c1ea91e897f0fe0a3731595330bc45b8bdef4047464a07116f891a94054b31 AS debian
 
 # Oracle's MySQL clients come from the official image rather than Debian, which carries MariaDB's in
 # their place, and neither family's client stands in for the other's. The 9.7 LTS client dumps and
