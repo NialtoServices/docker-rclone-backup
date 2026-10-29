@@ -20,7 +20,7 @@ FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1de
 
 # Oracle's MySQL clients come from the official image rather than Debian, which carries MariaDB's in
 # their place, and neither family's client stands in for the other's. The 9.7 LTS client dumps and
-# restores every supported server, 8.0 to 9.x. The client is always an LTS release and moves only to
+# restores every supported server, 8.4 to 9.x. The client is always an LTS release and moves only to
 # the next LTS, because an innovation release stops receiving fixes once the next one arrives.
 FROM mysql:9.7@sha256:8fb11c38b3551e22d50adbb688f027f8ff4ea2d2445aa277c1cc97b4af85ec54 AS mysql-oracle
 
