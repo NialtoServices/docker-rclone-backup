@@ -125,10 +125,9 @@ months. Propose each change before making it, and make it by the matching Mainte
   `test/servers`, `SERVER_VERSIONS` and the README. The suites tie checks to the oldest servers'
   behaviour: in `test/mariadb`, `OLDEST_VERSION` (10.11) is the server needing the `mysql.proc`
   routine grant and the one with no TLS for the "required fails" check; in `test/mysql`,
-  `OLDEST_VERSION` (8.0) is started with TLS off and `NATIVE_PASSWORD_VERSION` (8.4) is the newest
-  server that still allows `mysql_native_password`. Moving those to the next series breaks the
-  checks, so rework each case (for example, start a server with TLS switched off explicitly) rather
-  than renaming the version.
+  `NATIVE_PASSWORD_VERSION` (8.4) is the newest server that still allows `mysql_native_password`.
+  Moving those to the next series breaks the checks, so rework each case (as `test/mysql` does by
+  starting its own server with TLS switched off) rather than renaming the version.
 - **A release whose Publish run never built has no images.** Publish runs one at a time and GitHub
   keeps only one run pending, so a third run cancels the waiting one and two releases published
   close together can leave the earlier without images (a cancelled Publish run in the Actions tab).

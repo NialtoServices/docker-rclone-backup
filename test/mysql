@@ -37,8 +37,7 @@ NETWORK_NAME="mysql-test-$$"
 SERVER_NAME="mysql-server-$$"
 TLS_SERVER_NAME="mysql-tls-$$"
 
-SERVER_VERSIONS="8.0 8.4 9.7"
-OLDEST_VERSION=8.0
+SERVER_VERSIONS="8.4 9.7"
 NEWEST_VERSION=9.7
 
 # The newest server that can still create a mysql_native_password account, which the 9.7 client can't
@@ -116,22 +115,21 @@ create_app_database() {
   " > /dev/null
 }
 
-# Starts the server for VERSION and seeds the database app: a table of 1000 rows with a trigger and a
-# stored procedure. Object definitions don't name the database, because a dump stores their text and
-# the restore goes into a different one.
+# Starts the server for VERSION, passing it any further options, and seeds the database app: a table
+# of 1000 rows with a trigger and a stored procedure. Object definitions don't name the database,
+# because a dump stores their text and the restore goes into a different one.
 #
-# The oldest server has TLS switched off, which is how the checks see a refused `required`. The one
-# that can create a mysql_native_password account is told to keep that plugin, which 8.4 ships
-# switched off.
+# The server that can create a mysql_native_password account is told to keep that plugin, which 8.4
+# ships switched off.
 start_server() {
   SERVER_IMAGE="$(server_image_for "$1")"
 
-  case "$1" in
-    "${OLDEST_VERSION}") set -- --auto_generate_certs=OFF ;;
-    "${NATIVE_PASSWORD_VERSION}") set -- --mysql-native-password=ON ;;
-    *) set -- ;;
-  esac
+  if [ "$1" = "${NATIVE_PASSWORD_VERSION}" ]
+  then
+    set -- "$@" --mysql-native-password=ON
+  fi
 
+  shift
   stop_server
 
   docker run --detach --name "${SERVER_NAME}" --network "${NETWORK_NAME}" \
@@ -641,20 +639,19 @@ fail_on_error_lines_stops_on_an_error_line_only() {
 
 LAST_VERSION="${SERVER_VERSIONS##* }"
 
+# Every supported server generates its own certificate, so a refused `required` needs one started
+# with TLS switched off. An empty TLS version list is the server's own switch for that, and holds even
+# if an image ever ships certificates.
+start_server "${NEWEST_VERSION}" --tls-version=
+check "DATABASE_TLS=required against MySQL ${NEWEST_VERSION} with TLS switched off fails clearly and uploads nothing" with_log required_tls_against_a_server_without_tls_fails_clearly
+stop_server
+
 for VERSION in ${SERVER_VERSIONS}
 do
   start_server "${VERSION}"
 
   check "a backup of MySQL ${VERSION} restores its table, procedure and trigger" with_log backup_restores_on_the_server
-
-  case "${VERSION}" in
-    "${OLDEST_VERSION}")
-      check "DATABASE_TLS=required against MySQL ${VERSION}, which has no TLS, fails clearly and uploads nothing" with_log required_tls_against_a_server_without_tls_fails_clearly
-      ;;
-    *)
-      check "DATABASE_TLS=required works against MySQL ${VERSION}, which generates its own certificate" with_log required_tls_works_against_a_server_that_generates_a_certificate
-      ;;
-  esac
+  check "DATABASE_TLS=required works against MySQL ${VERSION}, which generates its own certificate" with_log required_tls_works_against_a_server_that_generates_a_certificate
 
   if [ "${VERSION}" = "${NATIVE_PASSWORD_VERSION}" ]
   then

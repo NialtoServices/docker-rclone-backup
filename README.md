@@ -10,7 +10,7 @@ Each image is `ghcr.io/nialtoservices/rclone-backup/<image>`, and does one thing
 | [`sqlite`](#sqlite) | One SQLite database file, snapshotted while the application runs | `<file name>.zst` |
 | [`postgres`](#postgresql) | One PostgreSQL database, servers 15 to 18 | `<database>.dump` |
 | [`mariadb`](#mariadb) | One MariaDB database, servers 10.11, 11.4, 11.8 and 12.3 | `<database>.sql.zst` |
-| [`mysql`](#mysql) | One MySQL database, servers 8.0, 8.4 and 9.x | `<database>.sql.zst` |
+| [`mysql`](#mysql) | One MySQL database, servers 8.4 and 9.x | `<database>.sql.zst` |
 
 Every run writes its backup to the target under that fixed name, replacing the object from the run before, except `files`, which mirrors the source. The images keep no history of their own; to back up more than one database, file or folder, run more than one container.
 
@@ -427,7 +427,7 @@ zstd -dc app.sql.zst | mariadb --user root restored
 
 ## MySQL
 
-The `mysql` image dumps one MySQL database with Oracle's `mysqldump`, compresses it with zstd and uploads it to the target as `<database>.sql.zst` (`app.sql.zst` for a database called `app`). Servers 8.0, 8.4 and 9.x are supported, all by the one client the image carries, MySQL 9.7's. The compressed dump is checked with `zstd --test` before it is uploaded, and a dump that fails the check, or whose client printed an error, is not uploaded.
+The `mysql` image dumps one MySQL database with Oracle's `mysqldump`, compresses it with zstd and uploads it to the target as `<database>.sql.zst` (`app.sql.zst` for a database called `app`). Servers 8.4 and 9.x are supported, all by the one client the image carries, MySQL 9.7's. The compressed dump is checked with `zstd --test` before it is uploaded, and a dump that fails the check, or whose client printed an error, is not uploaded.
 
 | Variable | Description |
 |---|---|
@@ -500,7 +500,7 @@ Put the backup account's password in `backup_password.txt`, keep it out of versi
 
 ### Restoring
 
-[Download the object](#fetching-a-backup-from-the-target), create an empty database and restore into it with the `mysql` client of your server's own version, as an account that may create the dump's objects (its routines and triggers keep their original definers, so `root` is the safe choice). The dump restores to any server from 8.0 on:
+[Download the object](#fetching-a-backup-from-the-target), create an empty database and restore into it with the `mysql` client of your server's own version, as an account that may create the dump's objects (its routines and triggers keep their original definers, so `root` is the safe choice). The dump restores to any server from 8.4 on:
 
 ```sh
 mysql --user root --execute 'CREATE DATABASE restored'
