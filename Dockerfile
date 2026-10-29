@@ -85,9 +85,9 @@ FROM debian AS supercronic
 
 ARG TARGETARCH
 # renovate: datasource=github-releases depName=aptible/supercronic extractVersion=^v(?<version>.+)$
-ARG SUPERCRONIC_VERSION=0.2.50
-ARG SUPERCRONIC_SHA256_AMD64=d2d7c97fbfefc763d5bbcbbb3f8d61f9dd3410ce5d05a737c414994b80b8cdd0
-ARG SUPERCRONIC_SHA256_ARM64=a1c0af9872e8de89a1ce5c1b596e26c42917d5a2cf914d98faee2e28156899e2
+ARG SUPERCRONIC_VERSION=0.2.51
+ARG SUPERCRONIC_SHA256_AMD64=cc232108374e8e2b537045f2d5eaa1229f619db314c3ba6a14d38b35dc0aa123
+ARG SUPERCRONIC_SHA256_ARM64=4ae22576a78223d8ccdf5f3b3660a5cbb5288416bf0ca96afc4a36d195932b94
 
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ca-certificates curl \
