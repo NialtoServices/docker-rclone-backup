@@ -22,7 +22,7 @@ FROM debian:trixie-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1de
 # their place, and neither family's client stands in for the other's. The 9.7 LTS client dumps and
 # restores every supported server, 8.4 to 9.x. The client is always an LTS release and moves only to
 # the next LTS, because an innovation release stops receiving fixes once the next one arrives.
-FROM mysql:9.7@sha256:8fb11c38b3551e22d50adbb688f027f8ff4ea2d2445aa277c1cc97b4af85ec54 AS mysql-oracle
+FROM mysql:9.7@sha256:86b390ef642f89a0157d6215dee33ddc928b8b0ecab173117f56f6c40cb24eab AS mysql-oracle
 
 # rclone must be verifiable back to its publisher's signing key, which only the official release zip
 # allows. The zip is verified against the PGP-signed SHA256SUMS, and that signature against the
