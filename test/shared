@@ -207,6 +207,23 @@ monitor_method_must_be_get_or_post() {
   done
 }
 
+# A line break would start another option in curl's config. The values are secrets, so the refusal
+# must not print them.
+monitor_settings_with_a_line_break_stop_the_container() {
+  for SETTING in \
+    "MONITOR_AUTHORIZATION=$(printf 'Bearer secret-token\nurl = http://monitor.invalid/leak')" \
+    "MONITOR_AUTHORIZATION=$(printf 'Bearer secret-token\r')" \
+    "MONITOR_FAILURE_URL=$(printf 'http://monitor.invalid/secret-token\nurl = http://monitor.invalid/leak')"
+  do
+    if ! start_stops_with_message "'${SETTING%%=*}' must not contain a line break" -e "${SETTING}" \
+      || grep -q secret-token "${LOG_FILE}"
+    then
+      echo "a line break in ${SETTING%%=*} was not refused, or its value was printed" >&2
+      return 1
+    fi
+  done
+}
+
 start_warns_without_a_success_url() {
   start_in_background
   wait_for logged_output_contains "MONITOR_SUCCESS_URL is not set, so a run that fails or never happens raises no alert"
@@ -466,6 +483,7 @@ check "a missing required setting stops the container at start-up, not at the fi
 check "start warns without a success URL" with_log start_warns_without_a_success_url
 check "start does not warn with a success URL" with_log start_is_quiet_with_a_success_url
 check "MONITOR_METHOD must be GET or POST" with_log monitor_method_must_be_get_or_post
+check "a line break in a monitor URL or MONITOR_AUTHORIZATION stops the container" with_log monitor_settings_with_a_line_break_stop_the_container
 check "a second run is refused while one is running" with_log second_run_is_refused_while_one_is_running
 check "the monitor hears the start and success of a passing run" with_log monitor_hears_a_passing_run
 check "MONITOR_METHOD=POST and MONITOR_AUTHORIZATION reach every ping" with_log monitor_posts_every_ping_with_the_authorization_header

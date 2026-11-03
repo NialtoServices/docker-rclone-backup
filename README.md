@@ -100,7 +100,7 @@ Two more settings shape the requests, for a monitor that accepts results only wh
 - `MONITOR_METHOD` is the method of the start and success requests: `GET`, the default, or `POST`, which sends them with an empty body. Any other value stops the container at start-up. The failure request is always a `POST`.
 - `MONITOR_AUTHORIZATION` is sent as the `Authorization` header of every request, for a monitor that checks a token, such as `Bearer <token>`.
 
-Each request times out after 10 seconds and is retried up to 5 times, including when the connection is refused. A request that still fails is logged as a warning and doesn't change the result of the run. The URLs and `MONITOR_AUTHORIZATION` are secrets, so they never appear in a process's arguments. Set the monitor's schedule or period to match `BACKUP_SCHEDULE`, with a grace time longer than your slowest run. A container started without `MONITOR_SUCCESS_URL` logs a warning, because a run that fails or never happens then raises no alert.
+Each request times out after 10 seconds and is retried up to 5 times, including when the connection is refused. A request that still fails is logged as a warning and doesn't change the result of the run. The URLs and `MONITOR_AUTHORIZATION` are secrets, so they never appear in a process's arguments, and a line break in any of them stops the container at start-up. Set the monitor's schedule or period to match `BACKUP_SCHEDULE`, with a grace time longer than your slowest run. A container started without `MONITOR_SUCCESS_URL` logs a warning, because a run that fails or never happens then raises no alert.
 
 ### Stopping the container
 

@@ -56,7 +56,7 @@ fi
 
 # A bad setting stops the container now, not at the first scheduled run.
 /usr/local/bin/backup --check
-require_monitor_method
+require_monitor_settings
 
 [ -n "${MONITOR_SUCCESS_URL:-}" ] || warn "MONITOR_SUCCESS_URL is not set, so a run that fails or never happens raises no alert"
 
