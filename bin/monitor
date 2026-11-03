@@ -8,6 +8,7 @@
 set -eu -o pipefail
 
 . /usr/local/lib/rclone-backup/log.sh
+. /usr/local/lib/rclone-backup/settings.sh
 
 # Healthchecks.io stores no more than this many bytes of a ping body, and the end of a log is the part
 # that explains a failure.
@@ -80,6 +81,10 @@ note_stop_request() {
 }
 
 [ "$#" -gt 0 ] || fatal "usage: $(basename "$0") COMMAND [ARGUMENT...]"
+
+# bin/start checks these for scheduled runs, but a run started without it, such as a one-off
+# `docker run`, reaches the pings unchecked.
+require_monitor_settings
 
 MONITOR_WORK_DIR="$(mktemp -d -t monitor.XXXXXX)" || fatal "failed to create a working directory"
 trap 'rm -rf "${MONITOR_WORK_DIR}"' EXIT
