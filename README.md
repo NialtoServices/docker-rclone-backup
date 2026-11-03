@@ -75,6 +75,7 @@ A key restricted to a single bucket can't create buckets, and rclone's check tha
 | `BACKUP_STAGING_PATH` | The `sqlite` and database images only: where the dump or snapshot is written before it is uploaded. It must be an absolute path to a writable directory, or the container stops at start-up. Defaults to `/tmp`; see each image for how to size it |
 | `TZ` | The time zone the schedule and the log timestamps follow, for example `Europe/London`. It must name a file in the time zone database, and a name that doesn't stops the container at start-up. Defaults to UTC |
 | `MONITOR_START_URL`, `MONITOR_SUCCESS_URL`, `MONITOR_FAILURE_URL` | Heartbeat monitor URLs, all optional; see [Monitoring](#monitoring) |
+| `MONITOR_METHOD`, `MONITOR_AUTHORIZATION` | How the monitor requests are sent, both optional; see [Monitoring](#monitoring) |
 | `RCLONE_*` | Passed through to rclone: any flag, or a remote's definition; see [Configuring rclone](#configuring-rclone) |
 
 Each image adds its own settings, listed in its section. `BACKUP_TARGET`, like `BACKUP_SOURCE` in `files`, is an rclone remote or an absolute path in every image. A relative path is refused, because it would resolve inside the container's own filesystem.
@@ -94,7 +95,12 @@ Set whichever URLs your monitor provides:
 
 A monitor that takes success and failure at one address, told apart by a query parameter such as `?status=up` and `?status=down`, takes that address in both settings with the parameter each needs.
 
-Each request times out after 10 seconds and is retried up to 5 times, including when the connection is refused. A request that still fails is logged as a warning and doesn't change the result of the run. The URLs are secrets, so they never appear in a process's arguments. Set the monitor's schedule or period to match `BACKUP_SCHEDULE`, with a grace time longer than your slowest run. A container started without `MONITOR_SUCCESS_URL` logs a warning, because a run that fails or never happens then raises no alert.
+Two more settings shape the requests, for a monitor that accepts results only when they are pushed to it:
+
+- `MONITOR_METHOD` is the method of the start and success requests: `GET`, the default, or `POST`, which sends them with an empty body. Any other value stops the container at start-up. The failure request is always a `POST`.
+- `MONITOR_AUTHORIZATION` is sent as the `Authorization` header of every request, for a monitor that checks a token, such as `Bearer <token>`.
+
+Each request times out after 10 seconds and is retried up to 5 times, including when the connection is refused. A request that still fails is logged as a warning and doesn't change the result of the run. The URLs and `MONITOR_AUTHORIZATION` are secrets, so they never appear in a process's arguments. Set the monitor's schedule or period to match `BACKUP_SCHEDULE`, with a grace time longer than your slowest run. A container started without `MONITOR_SUCCESS_URL` logs a warning, because a run that fails or never happens then raises no alert.
 
 ### Stopping the container
 

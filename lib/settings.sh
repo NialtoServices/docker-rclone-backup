@@ -36,7 +36,7 @@ require_object_name() {
 # the shared list names, so a typo fails at start-up instead of being silently ignored. Variables with
 # any other prefix, such as RCLONE_ and TZ, are never examined.
 refuse_unknown_settings() {
-  KNOWN_SETTINGS=" $* BACKUP_SCHEDULE BACKUP_TARGET MONITOR_START_URL MONITOR_SUCCESS_URL MONITOR_FAILURE_URL "
+  KNOWN_SETTINGS=" $* BACKUP_SCHEDULE BACKUP_TARGET MONITOR_START_URL MONITOR_SUCCESS_URL MONITOR_FAILURE_URL MONITOR_METHOD MONITOR_AUTHORIZATION "
   UNKNOWN_SETTINGS=""
 
   # env -0 separates entries with NUL, so a newline inside a value can't pass for a variable name.
@@ -129,6 +129,15 @@ require_time_zone() {
   esac
 
   fatal "'TZ' must name a time zone in /usr/share/zoneinfo (e.g. 'Europe/London'), not '${TZ}'"
+}
+
+# MONITOR_METHOD is optional, and an empty value counts as unset, which means GET. Any other method
+# would reach curl as given, so a typo would fail every start and success ping with only a warning.
+require_monitor_method() {
+  case "${MONITOR_METHOD:-GET}" in
+    GET | POST) ;;
+    *) fatal "'MONITOR_METHOD' must be 'GET' or 'POST', not '${MONITOR_METHOD}'" ;;
+  esac
 }
 
 # BACKUP_STAGING_PATH is optional, and an empty value counts as unset. A set one must be an absolute

@@ -184,6 +184,29 @@ missing_settings_stop_the_container_at_start() {
   [ "${START_STATUS}" -eq 1 ] && grep -q "'BACKUP_TARGET' is not set" "${LOG_FILE}"
 }
 
+monitor_method_must_be_get_or_post() {
+  for METHOD in PUT post ' POST'
+  do
+    if ! start_stops_with_message "'MONITOR_METHOD' must be 'GET' or 'POST'" -e "MONITOR_METHOD=${METHOD}"
+    then
+      echo "'${METHOD}' was not refused" >&2
+      return 1
+    fi
+  done
+
+  for METHOD in GET POST ''
+  do
+    START_STATUS=0
+    run_start_with_valid_settings -e "MONITOR_METHOD=${METHOD}" || START_STATUS=$?
+
+    if [ "${START_STATUS}" -ne 124 ]
+    then
+      echo "'${METHOD}' was refused" >&2
+      return 1
+    fi
+  done
+}
+
 start_warns_without_a_success_url() {
   start_in_background
   wait_for logged_output_contains "MONITOR_SUCCESS_URL is not set, so a run that fails or never happens raises no alert"
@@ -282,6 +305,22 @@ monitor_hears_a_passing_run() {
     && ! monitor_has_request '^POST /fail '
 }
 
+# The quote and backslash in the token would end or change the string in curl's config if they
+# reached it unescaped.
+monitor_posts_every_ping_with_the_authorization_header() {
+  start_fake_monitor "${NETWORK_NAME}" || return 1
+
+  hardened_run_with_monitor -e MONITOR_METHOD=POST -e 'MONITOR_AUTHORIZATION=Bearer to"ken\x' "${IMAGE}" sh -c '
+    /usr/local/bin/monitor true && ! /usr/local/bin/monitor false
+  ' > "${LOG_FILE}" 2>&1 || return 1
+
+  wait_for monitor_has_request '^POST /fail ' \
+    && monitor_has_request '^POST /start ' \
+    && monitor_has_request '^POST /success ' \
+    && ! monitor_has_request '^GET ' \
+    && [ "$(monitor_requests | grep -c -F 'Authorization: Bearer to"ken\x')" -eq 4 ]
+}
+
 failing_run_keeps_its_status_and_sends_a_redacted_log() {
   start_fake_monitor "${NETWORK_NAME}" || return 1
 
@@ -319,9 +358,12 @@ scheduled_run_reports_its_failure() {
   return "${SCHEDULED_STATUS}"
 }
 
-monitor_url_stays_out_of_process_arguments() {
+monitor_secrets_stay_out_of_process_arguments() {
   # The start URL is refused, so curl keeps retrying for about 30 seconds, long enough to be seen.
-  hardened_run --user 1000:1000 -e MONITOR_START_URL=http://127.0.0.1:1/secret-ping-token "${IMAGE}" sh -c '
+  hardened_run --user 1000:1000 \
+    -e MONITOR_START_URL=http://127.0.0.1:1/secret-ping-token \
+    -e 'MONITOR_AUTHORIZATION=Bearer secret-monitor-token' \
+    "${IMAGE}" sh -c '
     /usr/local/bin/monitor true 2> /dev/null &
 
     for ATTEMPT in $(seq 1 30)
@@ -331,7 +373,7 @@ monitor_url_stays_out_of_process_arguments() {
     done
     pgrep -x curl > /dev/null
 
-    ! ps -eo args | grep -q "[s]ecret-ping-token"
+    ! ps -eo args | grep -q -e "[s]ecret-ping-token" -e "[s]ecret-monitor-token"
   ' > "${LOG_FILE}" 2>&1
 }
 
@@ -423,14 +465,16 @@ check "an unknown setting stops the container" with_log unknown_settings_stop_th
 check "a missing required setting stops the container at start-up, not at the first run" with_log missing_settings_stop_the_container_at_start
 check "start warns without a success URL" with_log start_warns_without_a_success_url
 check "start does not warn with a success URL" with_log start_is_quiet_with_a_success_url
+check "MONITOR_METHOD must be GET or POST" with_log monitor_method_must_be_get_or_post
 check "a second run is refused while one is running" with_log second_run_is_refused_while_one_is_running
 check "the monitor hears the start and success of a passing run" with_log monitor_hears_a_passing_run
+check "MONITOR_METHOD=POST and MONITOR_AUTHORIZATION reach every ping" with_log monitor_posts_every_ping_with_the_authorization_header
 check "a failing run keeps its exit status and sends a redacted log" with_log failing_run_keeps_its_status_and_sends_a_redacted_log
 check "a scheduled run reports its failure" with_log scheduled_run_reports_its_failure
 check "docker stop lets a scheduled backup clean up, report its failure and exit 143" with_log stop_during_a_scheduled_backup
 check "a stopped run reports the output it wrote while stopping" with_log stopped_run_reports_the_output_it_wrote_while_stopping
 check "a stop signal before the run starts prevents the run" with_log stop_before_the_run_starts_prevents_the_run
-check "a monitor URL never appears in process arguments" with_log monitor_url_stays_out_of_process_arguments
+check "a monitor URL or authorization never appears in process arguments" with_log monitor_secrets_stay_out_of_process_arguments
 check "an object name with a slash, a leading dot or a leading hyphen is refused" with_log settings_helpers_refuse_bad_object_names
 check "rclone is quiet about a missing config file" with_log rclone_is_quiet_about_a_missing_config_file
 check "RCLONE_CONFIG still names a mounted config file" with_log rclone_config_names_a_mounted_config_file
