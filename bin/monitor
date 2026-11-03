@@ -2,21 +2,29 @@
 #
 # Runs COMMAND, reports its start, success or failure to the heartbeat monitor and exits with the
 # command's own status. The URLs are optional and come from MONITOR_START_URL, MONITOR_SUCCESS_URL
-# and MONITOR_FAILURE_URL.
+# and MONITOR_FAILURE_URL. MONITOR_METHOD chooses GET or POST for the start and success pings, and
+# MONITOR_AUTHORIZATION, when set, is sent as the Authorization header of every ping.
 
 set -eu -o pipefail
 
 . /usr/local/lib/rclone-backup/log.sh
+. /usr/local/lib/rclone-backup/settings.sh
 
 # Healthchecks.io stores no more than this many bytes of a ping body, and the end of a log is the part
 # that explains a failure.
 MONITOR_LOG_LIMIT=100000
 
+# Escapes a value for a double-quoted string in curl's config, where a backslash or a double quote
+# would otherwise end or change the string.
+curl_config_value() {
+  printf '%s' "$1" | sed 's/[\\"]/\\&/g'
+}
+
 # Sends one ping to the monitor. A ping that still fails after curl's retries is logged, and never
 # changes the outcome of the run being reported.
 #
-# The URL reaches curl as config on stdin because ping URLs are secrets, and curl's arguments are
-# visible in the host's process list.
+# The URL and the Authorization header reach curl as config on stdin because both are secrets, and
+# curl's arguments are visible in the host's process list.
 ping_monitor() {
   PING_EVENT="$1"
   PING_URL="$2"
@@ -24,7 +32,14 @@ ping_monitor() {
 
   [ -n "${PING_URL}" ] || return 0
 
-  printf 'url = "%s"\n' "${PING_URL}" | curl \
+  {
+    printf 'url = "%s"\n' "$(curl_config_value "${PING_URL}")"
+
+    if [ -n "${MONITOR_AUTHORIZATION:-}" ]
+    then
+      printf 'header = "Authorization: %s"\n' "$(curl_config_value "${MONITOR_AUTHORIZATION}")"
+    fi
+  } | curl \
     --config - \
     --fail \
     --silent \
@@ -35,6 +50,17 @@ ping_monitor() {
     --retry-connrefused \
     "$@" \
     || warn "failed to send the ${PING_EVENT} ping to the monitor"
+}
+
+# Sends a start or success ping, which carries no log. As a POST it has an empty body, whose
+# Content-Length: 0 satisfies servers that refuse a POST without a length.
+ping_monitor_without_log() {
+  if [ "${MONITOR_METHOD:-GET}" = "POST" ]
+  then
+    ping_monitor "$1" "$2" --data-binary ""
+  else
+    ping_monitor "$1" "$2"
+  fi
 }
 
 # rclone connection strings (`:s3,access_key_id=…,secret_access_key=…:bucket`) carry credentials
@@ -56,11 +82,15 @@ note_stop_request() {
 
 [ "$#" -gt 0 ] || fatal "usage: $(basename "$0") COMMAND [ARGUMENT...]"
 
+# bin/start checks these for scheduled runs, but a run started without it, such as a one-off
+# `docker run`, reaches the pings unchecked.
+require_monitor_settings
+
 MONITOR_WORK_DIR="$(mktemp -d -t monitor.XXXXXX)" || fatal "failed to create a working directory"
 trap 'rm -rf "${MONITOR_WORK_DIR}"' EXIT
 trap note_stop_request TERM
 
-ping_monitor start "${MONITOR_START_URL:-}"
+ping_monitor_without_log start "${MONITOR_START_URL:-}"
 
 COMMAND_STATUS=0
 
@@ -77,7 +107,7 @@ fi
 
 if [ "${COMMAND_STATUS}" -eq 0 ]
 then
-  ping_monitor success "${MONITOR_SUCCESS_URL:-}"
+  ping_monitor_without_log success "${MONITOR_SUCCESS_URL:-}"
 else
   redact_credentials < "${MONITOR_WORK_DIR}/log" | tail -c "${MONITOR_LOG_LIMIT}" > "${MONITOR_WORK_DIR}/body" \
     || warn "failed to prepare the log for the failure ping"

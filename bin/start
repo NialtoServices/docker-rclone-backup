@@ -6,6 +6,7 @@
 set -eu
 
 . /usr/local/lib/rclone-backup/log.sh
+. /usr/local/lib/rclone-backup/settings.sh
 
 BACKUP_SCHEDULE="${BACKUP_SCHEDULE:-0 0 * * *}"
 CRONTAB_PATH=/tmp/crontab
@@ -55,6 +56,7 @@ fi
 
 # A bad setting stops the container now, not at the first scheduled run.
 /usr/local/bin/backup --check
+require_monitor_settings
 
 [ -n "${MONITOR_SUCCESS_URL:-}" ] || warn "MONITOR_SUCCESS_URL is not set, so a run that fails or never happens raises no alert"
 

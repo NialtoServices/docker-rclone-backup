@@ -36,7 +36,7 @@ require_object_name() {
 # the shared list names, so a typo fails at start-up instead of being silently ignored. Variables with
 # any other prefix, such as RCLONE_ and TZ, are never examined.
 refuse_unknown_settings() {
-  KNOWN_SETTINGS=" $* BACKUP_SCHEDULE BACKUP_TARGET MONITOR_START_URL MONITOR_SUCCESS_URL MONITOR_FAILURE_URL "
+  KNOWN_SETTINGS=" $* BACKUP_SCHEDULE BACKUP_TARGET MONITOR_START_URL MONITOR_SUCCESS_URL MONITOR_FAILURE_URL MONITOR_METHOD MONITOR_AUTHORIZATION "
   UNKNOWN_SETTINGS=""
 
   # env -0 separates entries with NUL, so a newline inside a value can't pass for a variable name.
@@ -129,6 +129,33 @@ require_time_zone() {
   esac
 
   fatal "'TZ' must name a time zone in /usr/share/zoneinfo (e.g. 'Europe/London'), not '${TZ}'"
+}
+
+# MONITOR_METHOD is optional, and an empty value counts as unset, which means GET. Any other method
+# would reach curl as given, so a typo would fail every start and success ping with only a warning.
+#
+# The URLs and MONITOR_AUTHORIZATION reach curl as lines of its config, where a line break ends the
+# value and starts another option, such as a second URL sent the same header and log. A carriage
+# return left by an env file with Windows line endings would break every ping the same way. These
+# values are secrets, so the message names the setting but never shows it.
+require_monitor_settings() {
+  case "${MONITOR_METHOD:-GET}" in
+    GET | POST) ;;
+    *) fatal "'MONITOR_METHOD' must be 'GET' or 'POST', not '${MONITOR_METHOD}'" ;;
+  esac
+
+  CARRIAGE_RETURN="$(printf '\r')"
+  NEWLINE='
+'
+
+  for SETTING_NAME in MONITOR_START_URL MONITOR_SUCCESS_URL MONITOR_FAILURE_URL MONITOR_AUTHORIZATION
+  do
+    eval "SETTING_VALUE=\${${SETTING_NAME}:-}"
+
+    case "${SETTING_VALUE}" in
+      *"${CARRIAGE_RETURN}"* | *"${NEWLINE}"*) fatal "'${SETTING_NAME}' must not contain a line break" ;;
+    esac
+  done
 }
 
 # BACKUP_STAGING_PATH is optional, and an empty value counts as unset. A set one must be an absolute
