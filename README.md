@@ -88,21 +88,13 @@ Each scheduled run can report to a heartbeat monitor (sometimes called a dead ma
 
 Set whichever URLs your monitor provides:
 
-- `MONITOR_START_URL` is requested when a run starts.
+- `MONITOR_START_URL` is requested when a run starts. Leave it unset if your monitor has no separate "started" signal: a request it can't tell apart from a success would count as a heartbeat and delay the alert for a run that hangs.
 - `MONITOR_SUCCESS_URL` is requested when a run succeeds.
-- `MONITOR_FAILURE_URL` is requested when a run fails. It's sent as a `POST` whose body is the last 100 kB of the run's log. The log includes file paths, remote names and object names; option values in rclone connection strings are replaced with `REDACTED`.
+- `MONITOR_FAILURE_URL` is requested when a run fails. It's sent as a `POST` whose body is the last 100 kB of the run's log. The log includes file paths, remote names and object names; option values in rclone connection strings are replaced with `REDACTED`. A monitor that ignores the body still records the failure, and the details are then in the container's log. Leave it unset if your monitor has no failure signal: it alerts instead when the success request is overdue.
+
+A monitor that takes success and failure at one address, told apart by a query parameter such as `?status=up` and `?status=down`, takes that address in both settings with the parameter each needs.
 
 Each request times out after 10 seconds and is retried up to 5 times, including when the connection is refused. A request that still fails is logged as a warning and doesn't change the result of the run. The URLs are secrets, so they never appear in a process's arguments. Set the monitor's schedule or period to match `BACKUP_SCHEDULE`, with a grace time longer than your slowest run. A container started without `MONITOR_SUCCESS_URL` logs a warning, because a run that fails or never happens then raises no alert.
-
-| Monitor | `MONITOR_START_URL` | `MONITOR_SUCCESS_URL` | `MONITOR_FAILURE_URL` |
-|---|---|---|---|
-| [Healthchecks](https://healthchecks.io) | `https://hc-ping.com/<uuid>/start` | `https://hc-ping.com/<uuid>` | `https://hc-ping.com/<uuid>/fail` |
-| [Uptime Kuma](https://github.com/louislam/uptime-kuma) push monitor | *(unset)* | `https://<kuma-host>/api/push/<token>?status=up&msg=OK` | `https://<kuma-host>/api/push/<token>?status=down&msg=Backup%20failed` |
-| [StatusCake](https://www.statuscake.com) push check | *(unset)* | `https://push.statuscake.com/?PK=<key>&TestID=<id>&time=0` | *(unset)* |
-
-- Uptime Kuma and StatusCake have no "started" signal. Leave `MONITOR_START_URL` unset for them: a start ping would count as a successful heartbeat and delay the alert for a run that hangs.
-- StatusCake push checks have no failure signal either. StatusCake alerts when the success ping is overdue.
-- Healthchecks keeps the failure log in the check's event history. Uptime Kuma and StatusCake ignore the request body, so the details are in the container's log.
 
 ### Stopping the container
 
