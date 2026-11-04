@@ -197,6 +197,7 @@ The `sqlite` image takes a consistent snapshot of one SQLite database with `VACU
 - **Size the staging space for about twice the database.** The snapshot is a full copy of the database, and it is compressed into a second file before the first is removed, so the two briefly exist together. Make the `/tmp` tmpfs, or the volume at `BACKUP_STAGING_PATH`, large enough for both. A run that runs out of space fails, uploads nothing and leaves no staged file behind.
 - **An unchanged database adds no version.** The upload is compared by checksum, so a snapshot identical to the object already at the target is skipped. A target that can't report a checksum, such as a `crypt` remote, is uploaded on every run instead, and adds a version each time.
 - **A missing database fails the run.** The file is opened for writing only if it already exists, so a wrong path or an unmounted volume never produces an empty database.
+- **Neither container can run under gVisor.** SQLite keeps the snapshot and the application's writes apart with file locks on the database and its `-wal` and `-shm` files. gVisor (`runsc`) holds a sandbox's locks inside the sandbox, where the host kernel never sees them, so if either the backup container or the application's container runs under it, neither sees the other's locks. The snapshot can then capture a torn state, and the application's own writes can be lost. Run both on the host's default runtime.
 
 ### Running as the application's user
 
