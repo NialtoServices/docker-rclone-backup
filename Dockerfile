@@ -31,7 +31,7 @@ FROM debian AS rclone
 
 ARG TARGETARCH
 # renovate: datasource=github-releases depName=rclone/rclone extractVersion=^v(?<version>.+)$
-ARG RCLONE_VERSION=1.75.2
+ARG RCLONE_VERSION=1.76.0
 ARG RCLONE_SIGNER_FINGERPRINT=FBF737ECE9F8AB18604BD2AC93935E02FF3B54FA
 
 COPY keys/rclone.asc /tmp/rclone.asc
